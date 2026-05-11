@@ -231,7 +231,7 @@ SECCOMP_EOF
     setfacl -R -d -m u:1000:rwx "$LOGS_DIR"
     echo "  Container permissions set"
 
-    SECCOMP_FLAG="--cap-drop ALL --cap-add SYS_ADMIN --security-opt no-new-privileges --security-opt seccomp=$CONFIG_DIR/seccomp-profile.json"
+    SECCOMP_FLAG="--cap-drop ALL --cap-add SYS_ADMIN --cap-add SETUID --cap-add SETGID --security-opt apparmor=unconfined --security-opt seccomp=$CONFIG_DIR/seccomp-profile.json"
 fi
 
 # -------------------------------------------------------
@@ -257,7 +257,7 @@ RUN_CMD="$DOCKER_CMD run -d --name fl-client \
 RUN_CMD=$(echo "$RUN_CMD" | sed 's/  */ /g')
 
 # -------------------------------------------------------
-# Save run-client.sh (handles updates, pulls, restarts)
+# Save run-client.sh
 # -------------------------------------------------------
 
 SAVE_DIR="/opt/fl-client"
