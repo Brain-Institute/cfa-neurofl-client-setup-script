@@ -231,7 +231,7 @@ SECCOMP_EOF
     setfacl -R -d -m u:1000:rwx "$LOGS_DIR"
     echo "  Container permissions set"
 
-    SECCOMP_FLAG="--cap-drop ALL --security-opt no-new-privileges --security-opt seccomp=$CONFIG_DIR/seccomp-profile.json"
+    SECCOMP_FLAG="--cap-drop ALL --cap-add SYS_ADMIN --security-opt no-new-privileges --security-opt seccomp=$CONFIG_DIR/seccomp-profile.json"
 fi
 
 # -------------------------------------------------------
