@@ -231,7 +231,7 @@ SECCOMP_EOF
     setfacl -R -d -m u:1000:rwx "$LOGS_DIR"
     echo "  Container permissions set"
 
-    SECCOMP_FLAG="--cap-drop ALL --cap-add SYS_ADMIN --security-opt seccomp=$CONFIG_DIR/seccomp-profile.json"
+    SECCOMP_FLAG="--cap-drop ALL --security-opt no-new-privileges --security-opt seccomp=$CONFIG_DIR/seccomp-profile.json"
 fi
 
 # -------------------------------------------------------
@@ -299,7 +299,6 @@ echo ""
 EXISTING=$($DOCKER_CMD ps -a --filter "name=^/${CONTAINER}$" --format "{{.Status}}" 2>/dev/null)
 
 if [ -n "$EXISTING" ]; then
-    # Get the image ID the running container was built from
     RUNNING_IMAGE_ID=$($DOCKER_CMD inspect "$CONTAINER" --format "{{.Image}}" 2>/dev/null | cut -c8-19)
     LATEST_SHORT=$(echo "$NEW_IMAGE_ID" | cut -c1-12)
 
@@ -374,7 +373,6 @@ else
 fi
 RUNEOF
 
-# Replace placeholders with actual values
 sed -i "s|__DOCKER_CMD__|${DOCKER_CMD}|g" "$SAVE_DIR/run-client.sh"
 sed -i "s|__RUN_CMD__|${RUN_CMD}|g" "$SAVE_DIR/run-client.sh"
 chmod +x "$SAVE_DIR/run-client.sh"
