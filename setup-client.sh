@@ -269,9 +269,10 @@ if [ "$OS" != "Linux" ] || [ "$IS_WSL" = true ]; then
 fi
 mkdir -p "$SAVE_DIR"
 echo "#!/bin/bash" > "$SAVE_DIR/run-client.sh"
+echo "$DOCKER_CMD pull daccacrneurofed.azurecr.io/fl-client:latest" >> "$SAVE_DIR/run-client.sh"
+echo "$DOCKER_CMD stop fl-client 2>/dev/null || true" >> "$SAVE_DIR/run-client.sh"
+echo "$DOCKER_CMD rm fl-client 2>/dev/null || true" >> "$SAVE_DIR/run-client.sh"
 echo "$RUN_CMD" >> "$SAVE_DIR/run-client.sh"
-chmod +x "$SAVE_DIR/run-client.sh"
-echo "  Run command saved to: $SAVE_DIR/run-client.sh"
 
 echo ""
 echo "============================================"
