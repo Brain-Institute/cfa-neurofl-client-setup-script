@@ -1,0 +1,340 @@
+#!/bin/bash
+# =============================================================
+# NeuroFL Client Node Setup
+# =============================================================
+# One script for all platforms. Run once per machine.
+#
+# Linux:     curl -sSL https://raw.githubusercontent.com/<your-org>/neurofl/main/setup-client.sh | sudo bash
+# Mac:       curl -sSL https://raw.githubusercontent.com/<your-org>/neurofl/main/setup-client.sh | bash
+# Windows:   Open WSL terminal, then run the Linux command above
+# =============================================================
+set -e
+
+OS="$(uname -s)"
+# Detect WSL (Windows Subsystem for Linux)
+IS_WSL=false
+if grep -qi microsoft /proc/version 2>/dev/null; then
+    IS_WSL=true
+fi
+
+echo ""
+echo "============================================"
+echo "  NeuroFL Client Node Setup"
+echo "============================================"
+echo ""
+if [ "$IS_WSL" = true ]; then
+    echo "Detected: Windows (WSL)"
+elif [ "$OS" = "Darwin" ]; then
+    echo "Detected: macOS"
+else
+    echo "Detected: Linux"
+fi
+echo ""
+
+# -------------------------------------------------------
+# Collect inputs
+# -------------------------------------------------------
+
+read -p "Enter your API Token: " API_TOKEN
+if [ -z "$API_TOKEN" ]; then
+    echo "Error: API Token is required."
+    exit 1
+fi
+
+read -p "Enter your VM/Node Name (e.g., holland-bloorview-node-1): " VM_NAME
+if [ -z "$VM_NAME" ]; then
+    echo "Error: VM Name is required."
+    exit 1
+fi
+
+# Default directories vary by platform
+if [ "$IS_WSL" = true ]; then
+    # WSL can access Windows drives at /mnt/c/
+    DEFAULT_DATA_DIR="/mnt/c/fl-data"
+    DEFAULT_LOGS_DIR="/mnt/c/fl-logs"
+elif [ "$OS" = "Darwin" ]; then
+    DEFAULT_DATA_DIR="$HOME/fl-data"
+    DEFAULT_LOGS_DIR="$HOME/fl-logs"
+else
+    DEFAULT_DATA_DIR="/data/data-fl"
+    DEFAULT_LOGS_DIR="$HOME/fl-logs"
+fi
+
+read -p "Data directory path [$DEFAULT_DATA_DIR]: " DATA_DIR
+DATA_DIR="${DATA_DIR:-$DEFAULT_DATA_DIR}"
+
+read -p "Logs directory path [$DEFAULT_LOGS_DIR]: " LOGS_DIR
+LOGS_DIR="${LOGS_DIR:-$DEFAULT_LOGS_DIR}"
+
+DEFAULT_SERVER="https://api.neurofl.ca"
+read -p "Server URL [$DEFAULT_SERVER]: " SERVER_URL
+SERVER_URL="${SERVER_URL:-$DEFAULT_SERVER}"
+
+echo ""
+echo "--------------------------------------------"
+echo "  Configuration"
+echo "--------------------------------------------"
+echo "  API Token:    ${API_TOKEN:0:8}..."
+echo "  VM Name:      $VM_NAME"
+echo "  Data Dir:     $DATA_DIR"
+echo "  Logs Dir:     $LOGS_DIR"
+echo "  Server:       $SERVER_URL"
+echo "--------------------------------------------"
+echo ""
+read -p "Proceed? [Y/n]: " CONFIRM
+CONFIRM="${CONFIRM:-Y}"
+if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+    echo "Cancelled."
+    exit 0
+fi
+
+echo ""
+
+# -------------------------------------------------------
+# Create directories
+# -------------------------------------------------------
+
+mkdir -p "$DATA_DIR" "$LOGS_DIR"
+echo "  Created: $DATA_DIR"
+echo "  Created: $LOGS_DIR"
+
+# -------------------------------------------------------
+# Linux-specific: seccomp + ACLs
+# -------------------------------------------------------
+
+SECCOMP_FLAG=""
+
+if [ "$OS" = "Linux" ] && [ "$IS_WSL" = false ]; then
+    CONFIG_DIR="/opt/fl-client"
+    mkdir -p "$CONFIG_DIR"
+
+    cat > "$CONFIG_DIR/seccomp-profile.json" << 'SECCOMP_EOF'
+{
+    "defaultAction": "SCMP_ACT_ERRNO",
+    "defaultErrnoRet": 1,
+    "archMap": [
+        {
+            "architecture": "SCMP_ARCH_X86_64",
+            "subArchitectures": ["SCMP_ARCH_X86", "SCMP_ARCH_X32"]
+        },
+        {
+            "architecture": "SCMP_ARCH_AARCH64",
+            "subArchitectures": ["SCMP_ARCH_ARM"]
+        }
+    ],
+    "syscalls": [
+        {
+            "names": [
+                "accept", "accept4", "access", "arch_prctl", "bind", "brk", "capget",
+                "capset", "chdir", "chmod", "chown", "chown32", "clock_getres",
+                "clock_gettime", "clock_nanosleep", "close", "close_range", "connect",
+                "copy_file_range", "creat", "dup", "dup2", "dup3", "epoll_create",
+                "epoll_create1", "epoll_ctl", "epoll_ctl_old", "epoll_pwait",
+                "epoll_pwait2", "epoll_wait", "epoll_wait_old", "eventfd",
+                "eventfd2", "execve", "execveat", "exit", "exit_group", "faccessat",
+                "faccessat2", "fadvise64", "fadvise64_64", "fallocate",
+                "fanotify_mark", "fchdir", "fchmod", "fchmodat", "fchown",
+                "fchown32", "fchownat", "fcntl", "fcntl64", "fdatasync",
+                "fgetxattr", "flistxattr", "flock", "fork", "fremovexattr",
+                "fsetxattr", "fstat", "fstat64", "fstatat64", "fstatfs",
+                "fstatfs64", "fsync", "ftruncate", "ftruncate64", "futex",
+                "futex_waitv", "futimesat", "getcpu", "getcwd", "getdents",
+                "getdents64", "getegid", "getegid32", "geteuid", "geteuid32",
+                "getgid", "getgid32", "getgroups", "getgroups32", "getitimer",
+                "getpeername", "getpgid", "getpgrp", "getpid", "getppid",
+                "getpriority", "getrandom", "getresgid", "getresgid32",
+                "getresuid", "getresuid32", "getrlimit", "get_robust_list",
+                "getrusage", "getsid", "getsockname", "getsockopt",
+                "get_thread_area", "gettid", "gettimeofday", "getuid",
+                "getuid32", "getxattr", "inotify_add_watch", "inotify_init",
+                "inotify_init1", "inotify_rm_watch", "io_cancel", "ioctl",
+                "io_destroy", "io_getevents", "io_pgetevents", "ioprio_get",
+                "ioprio_set", "io_setup", "io_submit", "io_uring_enter",
+                "io_uring_register", "io_uring_setup", "ipc", "kill",
+                "landlock_add_rule", "landlock_create_ruleset",
+                "landlock_restrict_self", "lchown", "lchown32", "lgetxattr",
+                "link", "linkat", "listen", "listxattr", "llistxattr",
+                "_llseek", "lremovexattr", "lseek", "lsetxattr", "lstat",
+                "lstat64", "madvise", "membarrier", "memfd_create",
+                "memfd_secret", "mincore", "mkdir", "mkdirat", "mknod",
+                "mknodat", "mlock", "mlock2", "mlockall", "mmap", "mmap2",
+                "mprotect", "mq_getsetattr", "mq_notify", "mq_open",
+                "mq_timedreceive", "mq_timedsend", "mq_unlink", "mremap",
+                "msgctl", "msgget", "msgrcv", "msgsnd", "msync", "munlock",
+                "munlockall", "munmap", "name_to_handle_at", "nanosleep",
+                "newfstatat", "_newselect", "open", "openat", "openat2",
+                "pause", "pidfd_open", "pidfd_send_signal", "pipe", "pipe2",
+                "poll", "ppoll", "prctl", "pread64", "preadv", "preadv2",
+                "prlimit64", "process_mrelease", "pselect6", "ptrace",
+                "pwrite64", "pwritev", "pwritev2", "read", "readahead",
+                "readlink", "readlinkat", "readv", "recv", "recvfrom",
+                "recvmmsg", "recvmsg", "remap_file_pages", "removexattr",
+                "rename", "renameat", "renameat2", "restart_syscall",
+                "rmdir", "rseq", "rt_sigaction", "rt_sigpending",
+                "rt_sigprocmask", "rt_sigqueueinfo", "rt_sigreturn",
+                "rt_sigsuspend", "rt_sigtimedwait", "rt_tgsigqueueinfo",
+                "sched_getaffinity", "sched_getattr", "sched_getparam",
+                "sched_get_priority_max", "sched_get_priority_min",
+                "sched_getscheduler", "sched_rr_get_interval",
+                "sched_setaffinity", "sched_setattr", "sched_setparam",
+                "sched_setscheduler", "sched_yield", "seccomp", "select",
+                "semctl", "semget", "semop", "semtimedop", "send", "sendfile",
+                "sendfile64", "sendmmsg", "sendmsg", "sendto", "setfsgid",
+                "setfsgid32", "setfsuid", "setfsuid32", "setgid", "setgid32",
+                "setgroups", "setgroups32", "setitimer", "setpgid",
+                "setpriority", "setregid", "setregid32", "setresgid",
+                "setresgid32", "setresuid", "setresuid32", "setreuid",
+                "setreuid32", "setrlimit", "set_robust_list", "setsid",
+                "setsockopt", "set_thread_area", "set_tid_address",
+                "setuid", "setuid32", "setxattr", "shmat", "shmctl",
+                "shmdt", "shmget", "shutdown", "sigaltstack", "signalfd",
+                "signalfd4", "sigprocmask", "sigreturn", "socket",
+                "socketcall", "socketpair", "splice", "stat", "stat64",
+                "statfs", "statfs64", "statx", "symlink", "symlinkat",
+                "sync", "sync_file_range", "syncfs", "sysinfo", "tee",
+                "tgkill", "time", "timer_create", "timer_delete",
+                "timer_getoverrun", "timer_gettime", "timer_gettime64",
+                "timer_settime", "timer_settime64", "timerfd_create",
+                "timerfd_gettime", "timerfd_gettime64", "timerfd_settime",
+                "timerfd_settime64", "times", "tkill", "truncate",
+                "truncate64", "ugetrlimit", "umask", "uname", "unlink",
+                "unlinkat", "utime", "utimensat", "utimensat_time64",
+                "utimes", "vfork", "vmsplice", "wait4", "waitid",
+                "waitpid", "write", "writev"
+            ],
+            "action": "SCMP_ACT_ALLOW"
+        },
+        {
+            "names": [
+                "clone", "clone3", "unshare", "setns",
+                "mount", "umount", "umount2", "pivot_root", "chroot"
+            ],
+            "action": "SCMP_ACT_ALLOW",
+            "comment": "Required for bubblewrap (bwrap) sandbox inside the container"
+        },
+        {
+            "names": ["personality"],
+            "action": "SCMP_ACT_ALLOW",
+            "args": [{ "index": 0, "value": 0, "op": "SCMP_CMP_EQ" }]
+        }
+    ]
+}
+SECCOMP_EOF
+    chmod 644 "$CONFIG_DIR/seccomp-profile.json"
+    echo "  Seccomp profile installed"
+
+    # Install ACL support
+    if ! command -v setfacl &> /dev/null; then
+        apt-get update -qq && apt-get install -y -qq acl > /dev/null 2>&1
+        echo "  ACL support installed"
+    fi
+
+    # Grant UID 1000 access
+    setfacl -R -m u:1000:rwx "$DATA_DIR"
+    setfacl -R -d -m u:1000:rwx "$DATA_DIR"
+    setfacl -R -m u:1000:rwx "$LOGS_DIR"
+    setfacl -R -d -m u:1000:rwx "$LOGS_DIR"
+    echo "  Container permissions set"
+
+    SECCOMP_FLAG="--cap-drop ALL --cap-add SYS_ADMIN --security-opt no-new-privileges --security-opt seccomp=$CONFIG_DIR/seccomp-profile.json"
+fi
+
+# -------------------------------------------------------
+# Build the docker run command
+# -------------------------------------------------------
+
+DOCKER_CMD="docker"
+if [ "$OS" = "Linux" ] && [ "$IS_WSL" = false ]; then
+    DOCKER_CMD="sudo docker"
+fi
+
+RUN_CMD="$DOCKER_CMD run -d --name fl-client \
+  --restart unless-stopped \
+  ${SECCOMP_FLAG:+$SECCOMP_FLAG} \
+  -p 8501:8501 \
+  -v ${DATA_DIR}:/data \
+  -v ${LOGS_DIR}:/app/logs \
+  -e FL_SERVER_URL=\"${SERVER_URL}\" \
+  -e API_TOKEN=\"${API_TOKEN}\" \
+  -e VM_NAME=\"${VM_NAME}\" \
+  daccacrneurofed.azurecr.io/fl-client:latest"
+
+# Clean up extra whitespace from empty SECCOMP_FLAG on non-Linux
+RUN_CMD=$(echo "$RUN_CMD" | sed 's/  */ /g')
+
+# Save for future use
+SAVE_DIR="/opt/fl-client"
+if [ "$OS" != "Linux" ] || [ "$IS_WSL" = true ]; then
+    SAVE_DIR="$HOME/.neurofl"
+fi
+mkdir -p "$SAVE_DIR"
+echo "#!/bin/bash" > "$SAVE_DIR/run-client.sh"
+echo "$RUN_CMD" >> "$SAVE_DIR/run-client.sh"
+chmod +x "$SAVE_DIR/run-client.sh"
+echo "  Run command saved to: $SAVE_DIR/run-client.sh"
+
+echo ""
+echo "============================================"
+echo "  Setup Complete"
+echo "============================================"
+echo ""
+
+# -------------------------------------------------------
+# Pull image and start
+# -------------------------------------------------------
+
+read -p "Pull the latest image and start the client now? [Y/n]: " START_NOW
+START_NOW="${START_NOW:-Y}"
+
+if [[ "$START_NOW" =~ ^[Yy]$ ]]; then
+    echo ""
+    echo "Pulling latest image..."
+    $DOCKER_CMD pull daccacrneurofed.azurecr.io/fl-client:latest
+
+    # Stop existing container if running
+    $DOCKER_CMD stop fl-client 2>/dev/null || true
+    $DOCKER_CMD rm fl-client 2>/dev/null || true
+
+    echo ""
+    echo "Starting client..."
+    eval "$RUN_CMD"
+
+    echo ""
+    # Wait a moment for container to start
+    sleep 3
+
+    # Check status
+    if $DOCKER_CMD ps | grep -q fl-client; then
+        echo "============================================"
+        echo "  Client is running!"
+        echo "============================================"
+        echo ""
+        echo "  Dashboard: http://localhost:8501"
+        echo ""
+        echo "  Next steps:"
+        echo "    1. Open the dashboard in your browser"
+        echo "    2. Go to Node Configuration → Dataset Management"
+        echo "    3. Enter a dataset name and click Add"
+        echo "    4. Copy your data files into the folder it creates"
+        echo "       (located in: $DATA_DIR/<dataset-name>/)"
+        echo ""
+        echo "  Useful commands:"
+        echo "    $DOCKER_CMD logs -f fl-client         # Live logs"
+        echo "    $DOCKER_CMD restart fl-client          # Restart"
+        echo "    bash $SAVE_DIR/run-client.sh           # Re-run after updates"
+        echo ""
+    else
+        echo "  Container may have failed to start. Check logs:"
+        echo "    $DOCKER_CMD logs fl-client"
+        echo ""
+    fi
+else
+    echo "To start the client later, run:"
+    echo ""
+    echo "  bash $SAVE_DIR/run-client.sh"
+    echo ""
+    echo "Or copy this command:"
+    echo ""
+    echo "  $RUN_CMD"
+    echo ""
+fi
