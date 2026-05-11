@@ -4,8 +4,8 @@
 # =============================================================
 # One script for all platforms. Run once per machine.
 #
-# Linux:     curl -sSL https://raw.githubusercontent.com/<your-org>/neurofl/main/setup-client.sh | sudo bash
-# Mac:       curl -sSL https://raw.githubusercontent.com/<your-org>/neurofl/main/setup-client.sh | bash
+# Linux:     curl -sSL https://raw.githubusercontent.com/Brain-Institute/cfa-neurofl-client-setup-script/main/setup-client.sh -o setup-client.sh && sudo bash setup-client.sh
+# Mac:       curl -sSL https://raw.githubusercontent.com/Brain-Institute/cfa-neurofl-client-setup-script/main/setup-client.sh -o setup-client.sh && bash setup-client.sh
 # Windows:   Open WSL terminal, then run the Linux command above
 # =============================================================
 set -e
@@ -236,7 +236,7 @@ SECCOMP_EOF
     setfacl -R -d -m u:1000:rwx "$LOGS_DIR"
     echo "  Container permissions set"
 
-    SECCOMP_FLAG="--cap-drop ALL --cap-add SYS_ADMIN --security-opt no-new-privileges --security-opt seccomp=$CONFIG_DIR/seccomp-profile.json"
+    SECCOMP_FLAG="--cap-drop ALL --cap-add SYS_ADMIN --security-opt seccomp=$CONFIG_DIR/seccomp-profile.json"
 fi
 
 # -------------------------------------------------------
