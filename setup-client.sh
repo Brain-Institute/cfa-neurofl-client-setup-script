@@ -4,8 +4,8 @@
 # =============================================================
 # One script for all platforms. Run once per machine.
 #
-# Linux:     curl -sSL https://raw.githubusercontent.com/Brain-Institute/cfa-neurofl-client-setup-script/main/setup-client.sh -o setup-client.sh && sudo bash setup-client.sh
-# Mac:       curl -sSL https://raw.githubusercontent.com/Brain-Institute/cfa-neurofl-client-setup-script/main/setup-client.sh -o setup-client.sh && bash setup-client.sh
+# Linux:     curl -sSL https://raw.githubusercontent.com/Brain-Institute/cfa-neurofl-client-setup-script/main/setup-client.sh -o setup-client.sh && sudo bash setup-client.sh <site>-onboarding.tar.gz
+# Mac:       curl -sSL https://raw.githubusercontent.com/Brain-Institute/cfa-neurofl-client-setup-script/main/setup-client.sh -o setup-client.sh && bash setup-client.sh <site>-onboarding.tar.gz
 # Windows:   Open WSL terminal, then run the Linux command above
 # =============================================================
 set -e
@@ -31,21 +31,62 @@ fi
 echo ""
 
 # -------------------------------------------------------
-# Collect inputs
+# Load the onboarding bundle (replaces manual token/VM entry)
 # -------------------------------------------------------
+# The OBI-generated bundle carries ca.crt + <site>.key + config.env. Everything
+# that used to be typed in (token, VM name, server) — plus the new SuperLink
+# address and cert paths — now comes from config.env inside the bundle.
 
-read -p "Enter your API Token: " API_TOKEN
-if [ -z "$API_TOKEN" ]; then
-    echo "Error: API Token is required."
+BUNDLE_PATH="$1"
+if [ -z "$BUNDLE_PATH" ] || [ ! -f "$BUNDLE_PATH" ]; then
+    echo "Usage: bash setup-client.sh <site>-onboarding.tar.gz"
+    echo "Error: onboarding bundle not found."
     exit 1
 fi
 
-read -p "Enter your VM/Node Name (e.g., holland-bloorview-node-1): " VM_NAME
-if [ -z "$VM_NAME" ]; then
-    echo "Error: VM Name is required."
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+tar -xzf "$BUNDLE_PATH" -C "$WORK"
+
+CONFIG_ENV_SRC="$(find "$WORK" -name config.env -type f | head -n1)"
+if [ -z "$CONFIG_ENV_SRC" ]; then
+    echo "Error: config.env not found inside the bundle."
+    exit 1
+fi
+BUNDLE_SRC="$(dirname "$CONFIG_ENV_SRC")"
+
+# Pull just the scalars we need for display + path derivation. We deliberately
+# do NOT `source` config.env: Docker passes it verbatim via --env-file, and
+# values like NODE_CONFIG ('site="x" sandbox.resources="y"') contain spaces and
+# quotes that would break shell sourcing.
+cfg() { grep -E "^$1=" "$CONFIG_ENV_SRC" | head -n1 | cut -d= -f2-; }
+VM_NAME="$(cfg VM_NAME)"
+SUPERLINK_ADDRESS="$(cfg SUPERLINK_ADDRESS)"
+FL_SERVER_URL="$(cfg FL_SERVER_URL)"
+API_TOKEN="$(cfg API_TOKEN)"
+ROOT_CERTIFICATES="$(cfg ROOT_CERTIFICATES)"
+SUPERNODE_PRIVATE_KEY="$(cfg SUPERNODE_PRIVATE_KEY)"
+
+for required in VM_NAME SUPERLINK_ADDRESS ROOT_CERTIFICATES SUPERNODE_PRIVATE_KEY; do
+    if [ -z "${!required}" ]; then
+        echo "Error: config.env is missing $required."
+        exit 1
+    fi
+done
+
+# Derive cert/key filenames from the container paths config.env declares, so the
+# bundle and the run command can never disagree on names.
+CA_BASENAME="$(basename "$ROOT_CERTIFICATES")"
+KEY_BASENAME="$(basename "$SUPERNODE_PRIVATE_KEY")"
+
+if [ ! -f "$BUNDLE_SRC/$CA_BASENAME" ] || [ ! -f "$BUNDLE_SRC/$KEY_BASENAME" ]; then
+    echo "Error: bundle is missing $CA_BASENAME or $KEY_BASENAME."
     exit 1
 fi
 
+# -------------------------------------------------------
+# Host paths (the only thing still asked locally)
+# -------------------------------------------------------
 if [ "$IS_WSL" = true ]; then
     DEFAULT_DATA_DIR="/mnt/c/fl-data"
     DEFAULT_LOGS_DIR="/mnt/c/fl-logs"
@@ -63,19 +104,18 @@ DATA_DIR="${DATA_DIR:-$DEFAULT_DATA_DIR}"
 read -p "Logs directory path [$DEFAULT_LOGS_DIR]: " LOGS_DIR
 LOGS_DIR="${LOGS_DIR:-$DEFAULT_LOGS_DIR}"
 
-DEFAULT_SERVER="https://api.neurofl.ca"
-read -p "Server URL [$DEFAULT_SERVER]: " SERVER_URL
-SERVER_URL="${SERVER_URL:-$DEFAULT_SERVER}"
-
 echo ""
 echo "--------------------------------------------"
-echo "  Configuration"
+echo "  Configuration (from bundle)"
 echo "--------------------------------------------"
-echo "  API Token:    ${API_TOKEN:0:8}..."
-echo "  VM Name:      $VM_NAME"
-echo "  Data Dir:     $DATA_DIR"
-echo "  Logs Dir:     $LOGS_DIR"
-echo "  Server:       $SERVER_URL"
+echo "  VM Name:        $VM_NAME"
+echo "  SuperLink:      $SUPERLINK_ADDRESS"
+echo "  REST API:       ${FL_SERVER_URL:-n/a}"
+echo "  API Token:      ${API_TOKEN:0:8}..."
+echo "  Fleet CA:       $CA_BASENAME"
+echo "  Private key:    $KEY_BASENAME"
+echo "  Data Dir:       $DATA_DIR"
+echo "  Logs Dir:       $LOGS_DIR"
 echo "--------------------------------------------"
 echo ""
 read -p "Proceed? [Y/n]: " CONFIRM
@@ -96,16 +136,30 @@ echo "  Created: $DATA_DIR"
 echo "  Created: $LOGS_DIR"
 
 # -------------------------------------------------------
-# Linux-specific: seccomp + ACLs
+# Config dir + bundle secrets (all platforms)
 # -------------------------------------------------------
-
-SECCOMP_FLAG=""
 
 if [ "$OS" = "Linux" ] && [ "$IS_WSL" = false ]; then
     CONFIG_DIR="/opt/fl-client"
-    mkdir -p "$CONFIG_DIR"
+else
+    CONFIG_DIR="$HOME/.neurofl"
+fi
+mkdir -p "$CONFIG_DIR"
 
-    cat > "$CONFIG_DIR/seccomp-profile.json" << 'SECCOMP_EOF'
+# Install the bundle's secrets next to the run command (kept for restarts).
+cp "$BUNDLE_SRC/$CA_BASENAME"  "$CONFIG_DIR/$CA_BASENAME"
+cp "$BUNDLE_SRC/$KEY_BASENAME" "$CONFIG_DIR/$KEY_BASENAME"
+cp "$CONFIG_ENV_SRC"           "$CONFIG_DIR/config.env"
+chmod 600 "$CONFIG_DIR/$KEY_BASENAME" "$CONFIG_DIR/config.env"
+chmod 644 "$CONFIG_DIR/$CA_BASENAME"
+echo "  Secrets installed in $CONFIG_DIR"
+
+# -------------------------------------------------------
+# Outer Docker seccomp profile — required by nsjail (NOT bwrap) on every
+# platform. It permits the namespace/mount syscalls nsjail uses to build its
+# inner sandbox. The inner nsjail policy is a separate file shipped in the image.
+# -------------------------------------------------------
+cat > "$CONFIG_DIR/seccomp-profile.json" << 'SECCOMP_EOF'
 {
     "defaultAction": "SCMP_ACT_ERRNO",
     "defaultErrnoRet": 1,
@@ -207,7 +261,7 @@ if [ "$OS" = "Linux" ] && [ "$IS_WSL" = false ]; then
                 "mount", "umount", "umount2", "pivot_root", "chroot"
             ],
             "action": "SCMP_ACT_ALLOW",
-            "comment": "Required for bubblewrap (bwrap) sandbox inside the container"
+            "comment": "Required for nsjail to create its inner mount/user namespace inside the container"
         },
         {
             "names": ["personality"],
@@ -217,8 +271,18 @@ if [ "$OS" = "Linux" ] && [ "$IS_WSL" = false ]; then
     ]
 }
 SECCOMP_EOF
-    chmod 644 "$CONFIG_DIR/seccomp-profile.json"
-    echo "  Seccomp profile installed"
+chmod 644 "$CONFIG_DIR/seccomp-profile.json"
+echo "  Seccomp profile installed (nsjail outer policy)"
+
+# nsjail needs SYS_ADMIN + the seccomp profile on EVERY platform (bwrap could
+# run rootless; this nsjail setup cannot). SETUID/SETGID let gosu drop to the
+# container's UID 1000.
+SECURITY_FLAGS="--cap-drop ALL --cap-add SYS_ADMIN --cap-add SETUID --cap-add SETGID --security-opt seccomp=$CONFIG_DIR/seccomp-profile.json"
+
+# Linux-only host extras: AppArmor override (docker-default would block nsjail's
+# mounts) and POSIX ACLs so the UID-1000 container can write to data/logs.
+if [ "$OS" = "Linux" ] && [ "$IS_WSL" = false ]; then
+    SECURITY_FLAGS="$SECURITY_FLAGS --security-opt apparmor=unconfined"
 
     if ! command -v setfacl &> /dev/null; then
         apt-get update -qq && apt-get install -y -qq acl > /dev/null 2>&1
@@ -229,30 +293,34 @@ SECCOMP_EOF
     setfacl -R -d -m u:1000:rwx "$DATA_DIR"
     setfacl -R -m u:1000:rwx "$LOGS_DIR"
     setfacl -R -d -m u:1000:rwx "$LOGS_DIR"
-    echo "  Container permissions set"
-
-    SECCOMP_FLAG="--cap-drop ALL --cap-add SYS_ADMIN --cap-add SETUID --cap-add SETGID --security-opt apparmor=unconfined --security-opt seccomp=$CONFIG_DIR/seccomp-profile.json"
+    echo "  Container permissions set (UID 1000)"
 fi
 
 # -------------------------------------------------------
 # Build the docker run command
 # -------------------------------------------------------
 
+IMAGE="daccacrneurofed.azurecr.io/fl-client:latest"
+
 DOCKER_CMD="docker"
 if [ "$OS" = "Linux" ] && [ "$IS_WSL" = false ]; then
     DOCKER_CMD="sudo docker"
 fi
 
+# Secrets + connection config come from the bundle: the two certs are mounted
+# at the container paths config.env names, and --env-file supplies the rest
+# (SUPERLINK_ADDRESS, ROOT_CERTIFICATES, SUPERNODE_PRIVATE_KEY, NODE_CONFIG,
+# VM_NAME, API_TOKEN, FL_SERVER_URL, SUPERLINK_INSECURE=false).
 RUN_CMD="$DOCKER_CMD run -d --name fl-client \
   --restart unless-stopped \
-  ${SECCOMP_FLAG:+$SECCOMP_FLAG} \
+  ${SECURITY_FLAGS} \
   -p 8501:8501 \
   -v ${DATA_DIR}:/data \
   -v ${LOGS_DIR}:/app/logs \
-  -e FL_SERVER_URL=\"${SERVER_URL}\" \
-  -e API_TOKEN=\"${API_TOKEN}\" \
-  -e VM_NAME=\"${VM_NAME}\" \
-  daccacrneurofed.azurecr.io/fl-client:latest"
+  -v ${CONFIG_DIR}/${CA_BASENAME}:${ROOT_CERTIFICATES}:ro \
+  -v ${CONFIG_DIR}/${KEY_BASENAME}:${SUPERNODE_PRIVATE_KEY}:ro \
+  --env-file ${CONFIG_DIR}/config.env \
+  ${IMAGE}"
 
 RUN_CMD=$(echo "$RUN_CMD" | sed 's/  */ /g')
 
@@ -260,10 +328,7 @@ RUN_CMD=$(echo "$RUN_CMD" | sed 's/  */ /g')
 # Save run-client.sh
 # -------------------------------------------------------
 
-SAVE_DIR="/opt/fl-client"
-if [ "$OS" != "Linux" ] || [ "$IS_WSL" = true ]; then
-    SAVE_DIR="$HOME/.neurofl"
-fi
+SAVE_DIR="$CONFIG_DIR"
 mkdir -p "$SAVE_DIR"
 
 cat > "$SAVE_DIR/run-client.sh" << 'RUNEOF'
@@ -278,12 +343,28 @@ DOCKER_CMD="__DOCKER_CMD__"
 IMAGE="daccacrneurofed.azurecr.io/fl-client:latest"
 CONTAINER="fl-client"
 
+# config.env was installed next to this script by setup-client.sh.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CONFIG_ENV="$SCRIPT_DIR/config.env"
+cfg() { grep -E "^$1=" "$CONFIG_ENV" 2>/dev/null | head -n1 | cut -d= -f2-; }
+
 echo ""
 echo "=== NeuroFL Client ==="
 echo ""
 
 # ----- Step 1: Pull latest image -----
 echo "Checking for updates..."
+
+# Authenticate to the private ACR if pull credentials shipped in the bundle.
+ACR_REGISTRY="$(cfg ACR_REGISTRY)"
+ACR_REGISTRY="${ACR_REGISTRY:-${IMAGE%%/*}}"
+ACR_PULL_USER="$(cfg ACR_PULL_USER)"
+ACR_PULL_TOKEN="$(cfg ACR_PULL_TOKEN)"
+if [ -n "$ACR_PULL_USER" ] && [ -n "$ACR_PULL_TOKEN" ]; then
+    echo "Logging in to ${ACR_REGISTRY}..."
+    echo "$ACR_PULL_TOKEN" | $DOCKER_CMD login "$ACR_REGISTRY" -u "$ACR_PULL_USER" --password-stdin
+fi
+
 OLD_IMAGE_ID=$($DOCKER_CMD images --format "{{.ID}}" "$IMAGE" 2>/dev/null)
 $DOCKER_CMD pull $IMAGE
 NEW_IMAGE_ID=$($DOCKER_CMD images --format "{{.ID}}" "$IMAGE" 2>/dev/null)
