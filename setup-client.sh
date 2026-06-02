@@ -152,6 +152,17 @@ cp "$BUNDLE_SRC/$KEY_BASENAME" "$CONFIG_DIR/$KEY_BASENAME"
 cp "$CONFIG_ENV_SRC"           "$CONFIG_DIR/config.env"
 chmod 600 "$CONFIG_DIR/$KEY_BASENAME" "$CONFIG_DIR/config.env"
 chmod 644 "$CONFIG_DIR/$CA_BASENAME"
+
+# The container drops to fluser (UID 1000). When this script runs under sudo
+# (the Linux production path), the copies above land as root:root — a 600 key
+# owned by root is unreadable to UID 1000, so SuperNode crashes with EACCES.
+# Re-own the key to UID 1000 so the bind mount is readable inside the container.
+# Gated on running-as-root so it's a no-op on Mac/WSL (no sudo, no privilege
+# to chown), where Docker Desktop's mount layer already handles UID mapping.
+if [ "$(id -u)" -eq 0 ]; then
+    chown 1000:1000 "$CONFIG_DIR/$KEY_BASENAME"
+fi
+
 echo "  Secrets installed in $CONFIG_DIR"
 
 # -------------------------------------------------------
