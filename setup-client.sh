@@ -150,6 +150,18 @@ mkdir -p "$CONFIG_DIR"
 cp "$BUNDLE_SRC/$CA_BASENAME"  "$CONFIG_DIR/$CA_BASENAME"
 cp "$BUNDLE_SRC/$KEY_BASENAME" "$CONFIG_DIR/$KEY_BASENAME"
 cp "$CONFIG_ENV_SRC"           "$CONFIG_DIR/config.env"
+
+# Ensure runtime dependency installation is enabled. The ClientApp declares its
+# deps (torch, numpy, ...) in pyproject.toml; with this on, the SuperNode runs
+# `uv sync` to install them per task. Without it, apps fail with
+# ModuleNotFoundError. Force it here so the client works even if the bundle's
+# config.env predates this setting.
+if grep -qE "^ALLOW_RUNTIME_DEPENDENCY_INSTALLATION=" "$CONFIG_DIR/config.env"; then
+    sed -i 's/^ALLOW_RUNTIME_DEPENDENCY_INSTALLATION=.*/ALLOW_RUNTIME_DEPENDENCY_INSTALLATION=true/' "$CONFIG_DIR/config.env"
+else
+    echo "ALLOW_RUNTIME_DEPENDENCY_INSTALLATION=true" >> "$CONFIG_DIR/config.env"
+fi
+
 chmod 600 "$CONFIG_DIR/$KEY_BASENAME" "$CONFIG_DIR/config.env"
 chmod 644 "$CONFIG_DIR/$CA_BASENAME"
 
@@ -285,6 +297,148 @@ SECCOMP_EOF
 chmod 644 "$CONFIG_DIR/seccomp-profile.json"
 echo "  Seccomp profile installed (nsjail outer policy)"
 
+# -------------------------------------------------------
+# Inner nsjail app-sandbox policy + host-backed caches
+# -------------------------------------------------------
+# The ClientApp installs its own deps at run time (uv sync: torch, numpy, ...).
+# Flower's PACKAGED nsjail profile mounts /root/.cache and /root/.flwr as a 1 GB
+# tmpfs (RAM) — torch+CUDA wheels extract to several GB and overflow it with
+# "No space left on device". This custom profile binds those caches to the host
+# filesystem instead, so large installs land on disk. We point SuperExec at it
+# via FLWR_SUPEREXEC_SANDBOX_CONFIG below.
+cat > "$CONFIG_DIR/nsjail.cfg" << 'NSJAIL_EOF'
+name: "flower-app"
+mode: ONCE
+cwd: "/tmp"
+time_limit: 0
+
+clone_newnet: false
+clone_newuser: true
+clone_newns: true
+clone_newpid: true
+clone_newipc: true
+clone_newuts: false
+clone_newcgroup: false
+
+keep_env: true
+keep_caps: false
+
+rlimit_cpu: 3600
+rlimit_fsize: 2048
+rlimit_nofile: 4096
+rlimit_nproc: 1024
+rlimit_memlock: 67108864
+
+seccomp_string: "DEFAULT ALLOW"
+
+mount {
+  src: "/"
+  dst: "/"
+  is_bind: true
+  rw: false
+}
+
+mount {
+  dst: "/tmp"
+  fstype: "tmpfs"
+  rw: true
+  options: "size=1073741824"
+  nosuid: true
+  nodev: true
+}
+
+mount {
+  dst: "/dev/shm"
+  fstype: "tmpfs"
+  rw: true
+  options: "size=4294967296"
+  nosuid: true
+  nodev: true
+}
+
+# Host-backed bind mounts for FAB install + uv cache. tmpfs needs RAM, and
+# torch+CUDA wheels need several GB which exceeds the 1 GB packaged-profile
+# tmpfs. Backed by the host filesystem (/host-cache/*) instead.
+mount {
+  src: "/host-cache/flwr"
+  dst: "/root/.flwr"
+  is_bind: true
+  rw: true
+}
+
+mount {
+  src: "/host-cache/cache"
+  dst: "/root/.cache"
+  is_bind: true
+  rw: true
+}
+
+mount {
+  dst: "/root/.config"
+  fstype: "tmpfs"
+  rw: true
+  options: "size=67108864"
+  nosuid: true
+  nodev: true
+}
+
+mount {
+  src: "/proc"
+  dst: "/proc"
+  is_bind: true
+  rw: false
+  nosuid: true
+  nodev: true
+}
+
+# Optional GPU device nodes (skipped on CPU-only hosts).
+mount {
+  src: "/dev/nvidiactl"
+  dst: "/dev/nvidiactl"
+  is_bind: true
+  rw: true
+  mandatory: false
+  is_dir: false
+}
+
+mount {
+  src: "/dev/nvidia-uvm"
+  dst: "/dev/nvidia-uvm"
+  is_bind: true
+  rw: true
+  mandatory: false
+  is_dir: false
+}
+
+mount {
+  src: "/dev/nvidia-uvm-tools"
+  dst: "/dev/nvidia-uvm-tools"
+  is_bind: true
+  rw: true
+  mandatory: false
+  is_dir: false
+}
+
+mount {
+  src: "/dev/nvidia0"
+  dst: "/dev/nvidia0"
+  is_bind: true
+  rw: true
+  mandatory: false
+  is_dir: false
+}
+NSJAIL_EOF
+chmod 644 "$CONFIG_DIR/nsjail.cfg"
+echo "  nsjail app-sandbox profile installed (inner policy, host-backed caches)"
+
+# Host-backed cache dirs the nsjail profile binds in. Sized for torch+CUDA wheels
+# (several GB) which would overflow the packaged 1 GB tmpfs. Owned by UID 1000 so
+# the sandboxed ClientApp (fluser) can write extracted wheels here.
+HOST_CACHE_DIR="/var/lib/flwr-cache/${VM_NAME}"
+mkdir -p "$HOST_CACHE_DIR/cache" "$HOST_CACHE_DIR/flwr"
+chown -R 1000:1000 "$HOST_CACHE_DIR" 2>/dev/null || true
+echo "  Host-backed dependency cache ready at $HOST_CACHE_DIR"
+
 # nsjail needs SYS_ADMIN + the seccomp profile on EVERY platform (bwrap could
 # run rootless; this nsjail setup cannot). SETUID/SETGID let gosu drop to the
 # container's UID 1000.
@@ -330,6 +484,10 @@ RUN_CMD="$DOCKER_CMD run -d --name fl-client \
   -v ${LOGS_DIR}:/app/logs \
   -v ${CONFIG_DIR}/${CA_BASENAME}:${ROOT_CERTIFICATES}:ro \
   -v ${CONFIG_DIR}/${KEY_BASENAME}:${SUPERNODE_PRIVATE_KEY}:ro \
+  -v ${CONFIG_DIR}/nsjail.cfg:/etc/neurofl/nsjail.cfg:ro \
+  -v ${HOST_CACHE_DIR}/cache:/host-cache/cache \
+  -v ${HOST_CACHE_DIR}/flwr:/host-cache/flwr \
+  -e FLWR_SUPEREXEC_SANDBOX_CONFIG=/etc/neurofl/nsjail.cfg \
   --env-file ${CONFIG_DIR}/config.env \
   ${IMAGE}"
 
