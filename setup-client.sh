@@ -439,6 +439,17 @@ mkdir -p "$HOST_CACHE_DIR/cache" "$HOST_CACHE_DIR/flwr"
 chown -R 1000:1000 "$HOST_CACHE_DIR" 2>/dev/null || true
 echo "  Host-backed dependency cache ready at $HOST_CACHE_DIR"
 
+# Per-dataset SuperNode identities (multi-dataset enrollment). When a site adds
+# more than one dataset, each dataset beyond the first gets its own generated
+# keypair, enrolled live via {FL_SERVER_URL}/supernodes/register. Those keys +
+# node_ids MUST persist across container recreation (keys are unique server-side
+# and cannot be re-registered), so store them on a host-mounted dir owned by the
+# container's UID 1000. The first dataset reuses the bundle's pre-registered key.
+IDENTITIES_DIR="${CONFIG_DIR}/identities"
+mkdir -p "$IDENTITIES_DIR"
+chown -R 1000:1000 "$IDENTITIES_DIR" 2>/dev/null || true
+echo "  SuperNode identities dir ready at $IDENTITIES_DIR"
+
 # nsjail needs SYS_ADMIN + the seccomp profile on EVERY platform (bwrap could
 # run rootless; this nsjail setup cannot). SETUID/SETGID let gosu drop to the
 # container's UID 1000.
@@ -487,7 +498,9 @@ RUN_CMD="$DOCKER_CMD run -d --name fl-client \
   -v ${CONFIG_DIR}/nsjail.cfg:/etc/neurofl/nsjail.cfg:ro \
   -v ${HOST_CACHE_DIR}/cache:/host-cache/cache \
   -v ${HOST_CACHE_DIR}/flwr:/host-cache/flwr \
+  -v ${IDENTITIES_DIR}:/app/config/identities \
   -e FLWR_SUPEREXEC_SANDBOX_CONFIG=/etc/neurofl/nsjail.cfg \
+  -e SUPERNODE_IDENTITIES_DIR=/app/config/identities \
   --env-file ${CONFIG_DIR}/config.env \
   ${IMAGE}"
 
