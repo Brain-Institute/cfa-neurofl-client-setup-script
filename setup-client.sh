@@ -433,11 +433,27 @@ echo "  nsjail app-sandbox profile installed (inner policy, host-backed caches)"
 
 # Host-backed cache dirs the nsjail profile binds in. Sized for torch+CUDA wheels
 # (several GB) which would overflow the packaged 1 GB tmpfs. Owned by UID 1000 so
-# the sandboxed ClientApp (fluser) can write extracted wheels here.
+# the sandboxed ClientApp (fluser -> mapped uid in the nsjail user namespace) can
+# write extracted wheels AND install FABs here.
+#
+# IMPORTANT: pre-create flwr/apps and flwr/runtime-envs and own them by UID 1000.
+# The sandboxed ClientApp installs each FAB to flwr/apps/<name>.<ver>.<hash>/; if
+# apps/ doesn't exist yet, or was left root-owned by an earlier root-run, the
+# sandbox (running as a namespaced non-root uid) cannot create the new hash dir
+# and every round fails with PermissionError -> 0 results, no weights/metrics.
+# Creating + chowning these subdirs here (not leaving them for the sandbox to
+# create) makes the install path writable from a clean setup.
 HOST_CACHE_DIR="/var/lib/flwr-cache/${VM_NAME}"
-mkdir -p "$HOST_CACHE_DIR/cache" "$HOST_CACHE_DIR/flwr"
-chown -R 1000:1000 "$HOST_CACHE_DIR" 2>/dev/null || true
-echo "  Host-backed dependency cache ready at $HOST_CACHE_DIR"
+mkdir -p "$HOST_CACHE_DIR/cache" \
+         "$HOST_CACHE_DIR/flwr/apps" \
+         "$HOST_CACHE_DIR/flwr/runtime-envs"
+# Force ownership even if a stale root-owned apps/ already exists from a prior run.
+chown -R 1000:1000 "$HOST_CACHE_DIR" || {
+    echo "  WARNING: could not chown $HOST_CACHE_DIR to UID 1000 — FAB installs" >&2
+    echo "           inside the nsjail sandbox may fail with PermissionError." >&2
+}
+chmod -R u+rwX "$HOST_CACHE_DIR"
+echo "  Host-backed dependency cache ready at $HOST_CACHE_DIR (flwr/apps writable by UID 1000)"
 
 # Per-dataset SuperNode identities (multi-dataset enrollment). When a site adds
 # more than one dataset, each dataset beyond the first gets its own generated
@@ -604,7 +620,25 @@ if [ -n "$EXISTING" ]; then
     fi
 fi
 
-# ----- Step 3: Start new container -----
+# ----- Step 3: Ensure host-cache is writable by the sandbox (idempotent) -----
+# The nsjail'd ClientApp installs each FAB to <host-cache>/flwr/apps/<name>.<hash>/
+# as a namespaced non-root uid. If apps/ (or runtime-envs/) ever ends up
+# root-owned — e.g. created by an earlier root-run — the install fails with
+# PermissionError and every round returns 0 results (no weights, no metrics).
+# Re-assert ownership on every start so a stale root-owned subdir self-heals.
+HOST_CACHE_DIR="__HOST_CACHE_DIR__"
+# chown the host dir directly (not via docker). On Linux the setup used sudo for
+# docker, so mirror that here; on macOS/WSL the mount layer maps UID and this is
+# a no-op that harmlessly fails.
+SUDO=""
+if [ "$DOCKER_CMD" != "docker" ]; then SUDO="sudo"; fi
+if [ -d "$HOST_CACHE_DIR" ]; then
+    $SUDO mkdir -p "$HOST_CACHE_DIR/flwr/apps" "$HOST_CACHE_DIR/flwr/runtime-envs" "$HOST_CACHE_DIR/cache" 2>/dev/null || true
+    $SUDO chown -R 1000:1000 "$HOST_CACHE_DIR" 2>/dev/null \
+        || echo "  WARNING: could not chown $HOST_CACHE_DIR — FAB installs inside the sandbox may fail with PermissionError."
+fi
+
+# ----- Step 4: Start new container -----
 echo "Starting client..."
 __RUN_CMD__
 
@@ -637,6 +671,7 @@ fi
 RUNEOF
 
 sed -i "s|__DOCKER_CMD__|${DOCKER_CMD}|g" "$SAVE_DIR/run-client.sh"
+sed -i "s|__HOST_CACHE_DIR__|${HOST_CACHE_DIR}|g" "$SAVE_DIR/run-client.sh"
 sed -i "s|__RUN_CMD__|${RUN_CMD}|g" "$SAVE_DIR/run-client.sh"
 chmod +x "$SAVE_DIR/run-client.sh"
 echo "  Run command saved to: $SAVE_DIR/run-client.sh"
