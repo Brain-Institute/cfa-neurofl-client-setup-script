@@ -37,15 +37,127 @@ echo ""
 # that used to be typed in (token, VM name, server) — plus the new SuperLink
 # address and cert paths — now comes from config.env inside the bundle.
 
-BUNDLE_PATH="$1"
+BUNDLE_PATH=""
+ACCEPT_LICENSE=false
+for arg in "$@"; do
+    case "$arg" in
+        --accept-license) ACCEPT_LICENSE=true ;;
+        -*)               echo "Unknown option: $arg" >&2; exit 1 ;;
+        *)                [ -z "$BUNDLE_PATH" ] && BUNDLE_PATH="$arg" ;;
+    esac
+done
+
 if [ -z "$BUNDLE_PATH" ] || [ ! -f "$BUNDLE_PATH" ]; then
-    echo "Usage: bash setup-client.sh <site>-onboarding.tar.gz"
+    echo "Usage: bash setup-client.sh [--accept-license] <site>-onboarding.tar.gz"
     echo "Error: onboarding bundle not found."
     exit 1
 fi
 
+# -------------------------------------------------------
+# End User License Agreement — must be accepted BEFORE we install anything
+# -------------------------------------------------------
+# The NeuroFL Node software is licensed by the Ontario Brain Institute under a
+# EULA. Nothing is installed (no image pulled, no container started, no secrets
+# written) until the operator explicitly accepts it.
+#
+# The EULA ships INSIDE the onboarding bundle (generate-client-bundle.sh puts
+# LICENSE.md there). It deliberately is not fetched from GitHub: the client repo
+# is private, so a raw fetch would 404 on a client machine, and the install must
+# work on an air-gapped/offline host anyway.
+LICENSE_FILE="$(mktemp)"
+LICENSE_SOURCE=""
+
+LIC_TMP="$(mktemp -d)"
+tar -xzf "$BUNDLE_PATH" -C "$LIC_TMP" 2>/dev/null || true
+BUNDLED_LICENSE="$(find "$LIC_TMP" -iname 'LICENSE*' -type f | head -n1)"
+if [ -n "$BUNDLED_LICENSE" ] && [ -s "$BUNDLED_LICENSE" ]; then
+    cp "$BUNDLED_LICENSE" "$LICENSE_FILE"
+    LICENSE_SOURCE="onboarding bundle ($(basename "$BUNDLED_LICENSE"))"
+fi
+rm -rf "$LIC_TMP"
+
+if [ ! -s "$LICENSE_FILE" ]; then
+    echo "Error: the End User License Agreement was not found in the onboarding bundle."
+    echo "       Expected a LICENSE.md inside: $BUNDLE_PATH"
+    echo "       The EULA must be reviewed and accepted before installation."
+    echo "       Please request an updated onboarding bundle from OBI."
+    rm -f "$LICENSE_FILE"
+    exit 1
+fi
+
+if [ "$ACCEPT_LICENSE" = true ]; then
+    echo "End User License Agreement: accepted via --accept-license (source: $LICENSE_SOURCE)."
+    echo ""
+else
+    # Read the operator's answer from the terminal. Prefer /dev/tty so the prompt
+    # still works when the script itself was piped in (curl | bash); fall back to
+    # stdin. If we have NO interactive input at all we must NOT fail open — a
+    # license gate that silently passes is worse than useless — so we stop and
+    # tell the operator to re-run with --accept-license.
+    # Pick where to read the operator's answer from:
+    #   1. A real terminal (/dev/tty) — works even when the script itself was
+    #      piped in (curl ... | bash). Must be genuinely openable: in some
+    #      containers/cron/CI the path exists but errors on open.
+    #   2. Otherwise stdin, if something is actually connected (a tty, or a pipe
+    #      such as `printf 'I AGREE' | bash setup-client.sh bundle.tar.gz`).
+    #   3. Otherwise there is no way to ask -> FAIL CLOSED. A license gate that
+    #      silently passes when it cannot prompt is worse than no gate at all.
+    if (exec 3< /dev/tty) 2>/dev/null; then
+        exec 3< /dev/tty
+    elif [ -t 0 ] || [ -p /dev/stdin ] || [ ! -t 0 ]; then
+        exec 3<&0
+    else
+        echo "Error: the End User License Agreement must be accepted before installing," >&2
+        echo "       but this session has no terminal or input to prompt on." >&2
+        echo "" >&2
+        echo "       Review LICENSE.md in your onboarding bundle, then re-run with:" >&2
+        echo "         bash setup-client.sh --accept-license $BUNDLE_PATH" >&2
+        rm -f "$LICENSE_FILE"
+        exit 1
+    fi
+
+    echo "============================================"
+    echo "  End User License Agreement"
+    echo "============================================"
+    echo ""
+    echo "Before installing the NeuroFL Node software you must read and accept"
+    echo "the Ontario Brain Institute End User License Agreement."
+    echo ""
+    printf "Press Enter to view the agreement (press q to exit the viewer when done)... "
+    read -r _ <&3 || true
+    if command -v less >/dev/null 2>&1 && [ -t 1 ] && (exec < /dev/tty) 2>/dev/null; then
+        less -F -X "$LICENSE_FILE" < /dev/tty || true
+    else
+        cat "$LICENSE_FILE"
+    fi
+    echo ""
+    echo "--------------------------------------------"
+    echo "Source: $LICENSE_SOURCE"
+    echo ""
+    echo "By typing 'I AGREE' you confirm that you have read, understood, and"
+    echo "accept the End User License Agreement on behalf of your institution,"
+    echo "and that you are authorized to do so."
+    echo ""
+    printf "Type 'I AGREE' to accept, or anything else to cancel: "
+    LICENSE_ANSWER=""
+    read -r LICENSE_ANSWER <&3 || true
+    exec 3<&-
+    case "$(printf '%s' "$LICENSE_ANSWER" | tr '[:lower:]' '[:upper:]' | tr -d '[:space:]')" in
+        IAGREE) ;;
+        *)
+            echo ""
+            echo "License not accepted. Installation cancelled — nothing was installed."
+            rm -f "$LICENSE_FILE"
+            exit 1
+            ;;
+    esac
+    echo ""
+    echo "License accepted. Continuing with installation..."
+    echo ""
+fi
+
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+trap 'rm -rf "$WORK" "$LICENSE_FILE"' EXIT
 tar -xzf "$BUNDLE_PATH" -C "$WORK"
 
 CONFIG_ENV_SRC="$(find "$WORK" -name config.env -type f | head -n1)"
@@ -145,6 +257,22 @@ else
     CONFIG_DIR="$HOME/.neurofl"
 fi
 mkdir -p "$CONFIG_DIR"
+
+# Record the EULA acceptance for auditability: who accepted it, when, on which
+# host, and a hash of the exact text they accepted (so we can prove which
+# version was agreed to if the agreement is later revised).
+LICENSE_SHA="$( (sha256sum "$LICENSE_FILE" 2>/dev/null || shasum -a 256 "$LICENSE_FILE" 2>/dev/null) | awk '{print $1}' )"
+cp "$LICENSE_FILE" "$CONFIG_DIR/LICENSE.accepted.md" 2>/dev/null || true
+cat > "$CONFIG_DIR/license-acceptance.txt" <<EOF
+NeuroFL Node — End User License Agreement acceptance
+accepted_at:    $(date -u '+%Y-%m-%dT%H:%M:%SZ')
+accepted_by:    ${SUDO_USER:-${USER:-unknown}}
+host:           $(hostname 2>/dev/null || echo unknown)
+license_source: $LICENSE_SOURCE
+license_sha256: ${LICENSE_SHA:-unavailable}
+method:         $([ "$ACCEPT_LICENSE" = true ] && echo "--accept-license flag" || echo "interactive (typed I AGREE)")
+EOF
+chmod 644 "$CONFIG_DIR/license-acceptance.txt" 2>/dev/null || true
 
 # Install the bundle's secrets next to the run command (kept for restarts).
 cp "$BUNDLE_SRC/$CA_BASENAME"  "$CONFIG_DIR/$CA_BASENAME"
