@@ -205,18 +205,23 @@ else
     echo "============================================"
     echo ""
     echo "Before installing the NeuroFL Node software you must read and accept"
-    echo "the Ontario Brain Institute End User License Agreement."
+    echo "the Ontario Brain Institute End User License Agreement, reproduced in"
+    echo "full below."
     echo ""
-    printf "Press Enter to view the agreement (press q to exit the viewer when done)... "
+    printf "Press Enter to display the full agreement... "
     read -r _ <&3 || true
-    if command -v less >/dev/null 2>&1 && [ -t 1 ] && (exec < /dev/tty) 2>/dev/null; then
-        less -F -X "$LICENSE_FILE" < /dev/tty || true
-    else
-        cat "$LICENSE_FILE"
-    fi
     echo ""
-    echo "--------------------------------------------"
+    echo "============================================================"
+    # Print the WHOLE agreement to the terminal. We deliberately do NOT use a
+    # pager here: with `less` the operator can quit part-way (people were only
+    # seeing up to section 2) and the rest of a legally binding agreement would
+    # never be shown. Printing it in full puts every clause in the scrollback.
+    cat "$LICENSE_FILE"
+    echo "============================================================"
+    echo "                (end of agreement)"
+    echo ""
     echo "Source: $LICENSE_SOURCE"
+    echo "Scroll up to review the full text before answering."
     echo ""
     echo "By typing 'I AGREE' you confirm that you have read, understood, and"
     echo "accept the End User License Agreement on behalf of your institution,"
