@@ -54,6 +54,42 @@ if [ -z "$BUNDLE_PATH" ] || [ ! -f "$BUNDLE_PATH" ]; then
 fi
 
 # -------------------------------------------------------
+# Bundle extraction — tolerate an already-decompressed download
+# -------------------------------------------------------
+# Some browsers and download services (e.g. an Azure SAS link) transparently
+# gunzip a .tar.gz while KEEPING the .tar.gz name. `tar -xzf` then dies with
+#   "gzip: stdin: not in gzip format"
+# which is confusing and has burned sites before. So: sniff the actual file type
+# and extract accordingly, instead of trusting the extension.
+extract_bundle() {   # extract_bundle <dest-dir>
+    _dest="$1"
+    if gzip -t "$BUNDLE_PATH" >/dev/null 2>&1; then
+        tar -xzf "$BUNDLE_PATH" -C "$_dest"          # real .tar.gz
+    elif tar -tf "$BUNDLE_PATH" >/dev/null 2>&1; then
+        tar -xf  "$BUNDLE_PATH" -C "$_dest"          # plain .tar (was decompressed in transit)
+    else
+        return 1
+    fi
+}
+
+# Validate the bundle up front so a bad download fails with a clear message
+# rather than a cryptic gzip/tar error deep in the install.
+if ! extract_bundle "$(mktemp -d)" >/dev/null 2>&1; then
+    echo "Error: '$BUNDLE_PATH' is not a readable onboarding bundle." >&2
+    echo "" >&2
+    echo "  It is neither a valid .tar.gz nor a plain .tar archive. This usually" >&2
+    echo "  means the download was corrupted or incomplete." >&2
+    echo "" >&2
+    echo "  What it actually looks like:" >&2
+    echo "    $(file -b "$BUNDLE_PATH" 2>/dev/null || echo 'unknown file type')" >&2
+    echo "    size: $(wc -c < "$BUNDLE_PATH" 2>/dev/null || echo '?') bytes" >&2
+    echo "" >&2
+    echo "  Re-download the bundle and try again. Do not open/re-save it with an" >&2
+    echo "  archive tool in between — transfer it as-is." >&2
+    exit 1
+fi
+
+# -------------------------------------------------------
 # End User License Agreement — must be accepted BEFORE we install anything
 # -------------------------------------------------------
 # The NeuroFL Node software is licensed by the Ontario Brain Institute under a
@@ -155,7 +191,7 @@ NEUROFL_EULA_END
 
 # A LICENSE.md inside the onboarding bundle (newer bundles carry one) wins.
 LIC_TMP="$(mktemp -d)"
-tar -xzf "$BUNDLE_PATH" -C "$LIC_TMP" 2>/dev/null || true
+extract_bundle "$LIC_TMP" >/dev/null 2>&1 || true
 BUNDLED_LICENSE="$(find "$LIC_TMP" -iname 'LICENSE*' -type f | head -n1)"
 if [ -n "$BUNDLED_LICENSE" ] && [ -s "$BUNDLED_LICENSE" ]; then
     cp "$BUNDLED_LICENSE" "$LICENSE_FILE"
@@ -247,7 +283,7 @@ fi
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK" "$LICENSE_FILE"' EXIT
-tar -xzf "$BUNDLE_PATH" -C "$WORK"
+extract_bundle "$WORK"
 
 CONFIG_ENV_SRC="$(find "$WORK" -name config.env -type f | head -n1)"
 if [ -z "$CONFIG_ENV_SRC" ]; then
