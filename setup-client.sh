@@ -58,15 +58,102 @@ fi
 # -------------------------------------------------------
 # The NeuroFL Node software is licensed by the Ontario Brain Institute under a
 # EULA. Nothing is installed (no image pulled, no container started, no secrets
-# written) until the operator explicitly accepts it.
+# written to disk) until the operator explicitly accepts it.
 #
-# The EULA ships INSIDE the onboarding bundle (generate-client-bundle.sh puts
-# LICENSE.md there). It deliberately is not fetched from GitHub: the client repo
-# is private, so a raw fetch would 404 on a client machine, and the install must
-# work on an air-gapped/offline host anyway.
+# The agreement text is EMBEDDED below rather than fetched or read from the
+# bundle. Operators always curl this script fresh, so embedding means the gate
+# works for every client — including sites whose onboarding bundle predates the
+# EULA — and on offline/air-gapped hosts. If a (newer) LICENSE.md is present in
+# the onboarding bundle it takes precedence, so a revised agreement shipped with
+# a new bundle supersedes the copy baked in here.
 LICENSE_FILE="$(mktemp)"
-LICENSE_SOURCE=""
+LICENSE_SOURCE="embedded in setup-client.sh"
 
+cat > "$LICENSE_FILE" <<'NEUROFL_EULA_END'
+END USER LICENSE AGREEMENT ("EULA")   
+
+Software: NeuroFL Node (also known as "NeuroFL Client")
+
+Node Licensor: Ontario Brain Institute (“OBI”) 
+
+0. Background 
+
+You desire to upload certain proprietary software, created and owned by OBI.  This is referred to internally as the NeuroFL Node software or, for the purposes of this Agreement, the “Software”, and includes all iterations of that that software, as amended, updated modified for replaced from time to time.  While certain aspects of the Software are installed on your local network, the Software is primarily installed and operated through a cloud server operated by or on behalf of OBI (the “NeuroFL Server”).   While not the exclusive use case, and without limiting potential use cases going forward, it is contemplated that you will upload certain aspects of the Software onto your local computer network, and in connection with various research projects that exist from time to time, it is anticipated that you will upload data (“Data”) to your computer network through the interface of the Software, or accessible by the Software.  During the time that parts of the Software are installed on your computer network or you have access to the Software and the NeuroFL Server, your computer network is referred to a “NeuroFL Node”.   In consultation between OBI and you (the “Consultation Process”), various parties (“Modelers”) may be given access to the Data for the purpose of running and training AI models (the “AI Models”), with all work product so produced by the Modeler or derived from the AI models from time to time referred to as the “AI Work Product”.  The current intention in creating and implementing the Software, is to create a number of NeuroFL Nodes, that may be accessed by the AI Models of the Modelers in order to improve the understanding of brain disorders and support brain health in keeping with OBI’s mission statement and objectives.   The collection of NeuroFL Nodes existing from time to time and managed by OBI is referred to as the “NeuroFL Federated Learning Network”. 
+
+1. License Grant 
+
+OBI ("Licensor") grants you ("Licensee") a non-exclusive, non-transferable, revocable license to use the Software solely for the purpose of participating in the NeuroFL Federated Learning Network and implementing a NeuroFL Node to enable the training of analysis models or AI Models designed by a Modeler (the “Permitted Purpose”). 
+
+Requirements for Operation:  
+
+The NeuroFL Node must connect to the NeuroFL Server and maintain a secure connection with that server to function and accomplish its tasks. Any disruption or failure to maintain this secure connection may result in the NeuroFL Node being unable to participate in the NeuroFL Federated Learning Network, or otherwise not properly functioning. 
+
+2. Ownership and Intellectual Property 
+
+The Software and all intellectual property rights in the Software are and shall remain the exclusive property of OBI. Any open-source components included in the Software are owned by their respective rightful creators and are subject to their applicable open-source licenses. 
+
+All intellectual property rights in the AI Models, and the AI Work Product remain the sole property of the Modeler who created the AI Model. The Licensee does not acquire any ownership rights to the AI Models or the AI Work Product by using the Software and participating in the NeuroFL Federated Learning Network. 
+
+3. Additional User Obligations 
+
+* You agree to use the Software in compliance with all applicable laws and regulations. 
+
+* You must not interfere with or disrupt the NeuroFL Federated Learning Network or other users' access to the Software. 
+
+* You must comply with all terms of this EULA and any project agreement with OBI existing from time to time. 
+
+* You may not modify, reverse engineer, decompile, disassemble, or create derivative works of the Software. 
+
+* You may not redistribute, sublicense, or transfer the Software to any third party. 
+
+* You may not use the Software for any illegal or unauthorized purpose. 
+
+* You shall not upload Data accessible to the AI Models where such access or use by the Modeler or AI Model is prohibited by agreements that you have with third parties, is otherwise prohibited, or is contrary to what was agreed in the Consultation Process. 
+
+* You shall not grant access to the Software to any person or entity, other than your employees, or persons employed by the entity that you are employed by, provided (a) that any such access shall be solely for the Purpose and (b) that such person shall be bound by the terms of this EULA. 
+
+4. Limitations of Liability 
+
+Disclaimer of Warranties: THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT. 
+
+No Liability: IN NO EVENT SHALL OBI OR ITS DEVELOPERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, CONSEQUENTIAL, OR EXEMPLARY DAMAGES ARISING OUT OF OR IN ANY WAY RELATED TO THE USE OF THE SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES. 
+
+5. Termination 
+
+This license is effective until terminated. OBI may terminate this license immediately upon written request if you breach any term of this EULA, or upon completion of any project agreement with OBI or at any time by notice to you, which may be given at will. You may terminate this license at any time by ceasing use of the Software and uninstalling it from all devices. Upon termination, you must immediately cease all use of the Software, destroy all copies in your possession and cease connection with the NeuroFL Server.  Sections 2, 3, 4, 5, 6, 8 and 9 survive termination of this EULA. 
+
+6. Privacy Policy 
+
+The Software collects NeuroFL Node activity log data and training data during training rounds and from time to time. Both the activity log data, training data, and other model parameters are transferred to the central NeuroFL Server for operational purposes. No other Data is collected, stored, or transferred. The Licensee remains the custodian and/or owner of all Data, except for Data expressly transferred as described above and except for AI Work Product.  
+
+7. Updates and Maintenance 
+
+OBI may provide updates or maintenance for the Software at its sole discretion. You are not entitled to receive any updates or support, and OBI is under no obligation to provide them. 
+
+8. Governing Law and Dispute Resolution 
+
+This EULA shall be governed by and construed in accordance with the laws of the Province of Ontario, Canada. Any disputes arising under or in connection with this EULA shall be resolved exclusively in the courts of Ontario. 
+
+9. Miscellaneous Provisions 
+
+Severability: If any provision of this EULA is found to be unenforceable, the remaining provisions shall remain in full force and effect. 
+
+Entire Agreement: This EULA constitutes the entire agreement between you and OBI regarding the use of the Software. 
+
+Amendments: OBI reserves the right to amend this EULA at any time upon notice to you, which notice may be in a form considered reasonable by OBI. Continued use of the Software after such amendments constitutes acceptance of the revised terms. 
+
+10. Acceptance of Terms 
+
+By installing or using the Software, you acknowledge that you have read this EULA, understand it, and agree to be bound by its terms and conditions. If you do not agree to these terms, do not install or use the Software. 
+
+ 
+
+Effective Date: January 30, 2026
+
+Contact Information: For questions or concerns regarding this EULA, please contact OBI at informatics@braininstitute.ca. 
+NEUROFL_EULA_END
+
+# A LICENSE.md inside the onboarding bundle (newer bundles carry one) wins.
 LIC_TMP="$(mktemp -d)"
 tar -xzf "$BUNDLE_PATH" -C "$LIC_TMP" 2>/dev/null || true
 BUNDLED_LICENSE="$(find "$LIC_TMP" -iname 'LICENSE*' -type f | head -n1)"
@@ -77,10 +164,7 @@ fi
 rm -rf "$LIC_TMP"
 
 if [ ! -s "$LICENSE_FILE" ]; then
-    echo "Error: the End User License Agreement was not found in the onboarding bundle."
-    echo "       Expected a LICENSE.md inside: $BUNDLE_PATH"
-    echo "       The EULA must be reviewed and accepted before installation."
-    echo "       Please request an updated onboarding bundle from OBI."
+    echo "Error: the End User License Agreement could not be loaded." >&2
     rm -f "$LICENSE_FILE"
     exit 1
 fi
