@@ -54,6 +54,36 @@ if [ -z "$BUNDLE_PATH" ] || [ ! -f "$BUNDLE_PATH" ]; then
 fi
 
 # -------------------------------------------------------
+# Prerequisites — check BEFORE we ask anyone to accept a licence
+# -------------------------------------------------------
+# Fresh cloud VMs (GCP/AWS/Azure images) usually do NOT ship Docker. Without this
+# check the script would run all the way through the EULA and setup, then fail
+# with an opaque "docker: command not found" — so fail early and say what to do.
+if ! command -v docker >/dev/null 2>&1; then
+    echo "Error: Docker is not installed on this machine." >&2
+    echo "" >&2
+    echo "  The NeuroFL client runs as a Docker container. Install Docker first:" >&2
+    echo "" >&2
+    echo "    # Debian / Ubuntu (incl. most GCP, AWS and Azure images):" >&2
+    echo "    curl -fsSL https://get.docker.com | sudo sh" >&2
+    echo "" >&2
+    echo "  Then re-run this script." >&2
+    exit 1
+fi
+
+# Docker present but the daemon isn't reachable (not started, or the user isn't
+# allowed to talk to it) — another very common first-run stumble on a new VM.
+if ! docker info >/dev/null 2>&1 && ! sudo docker info >/dev/null 2>&1; then
+    echo "Error: Docker is installed but the daemon is not reachable." >&2
+    echo "" >&2
+    echo "  Start it, then re-run this script:" >&2
+    echo "    sudo systemctl enable --now docker" >&2
+    echo "" >&2
+    echo "  (If it is running, you may need to run this script with sudo.)" >&2
+    exit 1
+fi
+
+# -------------------------------------------------------
 # Bundle extraction — tolerate an already-decompressed download
 # -------------------------------------------------------
 # Some browsers and download services (e.g. an Azure SAS link) transparently
