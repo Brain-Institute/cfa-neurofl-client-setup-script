@@ -749,13 +749,28 @@ mkdir -p "$IDENTITIES_DIR"
 chown -R 1000:1000 "$IDENTITIES_DIR" 2>/dev/null || true
 echo "  SuperNode identities dir ready at $IDENTITIES_DIR"
 
-# nsjail needs SYS_ADMIN + the seccomp profile on EVERY platform (bwrap could
-# run rootless; this nsjail setup cannot). SETUID/SETGID let gosu drop to the
-# container's UID 1000.
-SECURITY_FLAGS="--cap-drop ALL --cap-add SYS_ADMIN --cap-add SETUID --cap-add SETGID --security-opt seccomp=$CONFIG_DIR/seccomp-profile.json"
+# nsjail sandbox requirements — ALL of these are mandatory, and getting any one
+# wrong makes the inner sandbox fail with:
+#   mount('/', MS_REC|MS_PRIVATE): Permission denied
+#
+# nsjail creates a new user namespace with no uidmap, so the sandboxed process
+# is mapped straight through to the container's own UID. For the mandatory
+# mount('/', MS_PRIVATE) inside that namespace to succeed, the container must
+# run as UID 0 (--user 0:0) AND retain CAP_SYS_ADMIN in its bounding set:
+#   - As non-root (the image default, fluser/UID 1000), the sandbox lands
+#     without CAP_SYS_ADMIN in the new userns and the mount is denied.
+#   - Under `--cap-drop ALL`, even root can't write /proc/<pid>/uid_map, so the
+#     namespace never initializes.
+# So: run as root and DO NOT cap-drop. nsjail is what isolates the workload;
+# the outer container being root only provides the capabilities nsjail needs.
+# (The image runs supervisord with no per-program user=, so root is fine; the
+# host-side data/cache dirs are owned by UID 1000 but root writes them freely.)
+SECURITY_FLAGS="--user 0:0 --cap-add SYS_ADMIN --cap-add SETUID --cap-add SETGID --security-opt seccomp=$CONFIG_DIR/seccomp-profile.json"
 
 # Linux-only host extras: AppArmor override (docker-default would block nsjail's
-# mounts) and POSIX ACLs so the UID-1000 container can write to data/logs.
+# mounts) and POSIX ACLs on data/logs. The container runs as root now, so it can
+# write these regardless, but we keep the UID-1000 ACLs so files it creates stay
+# accessible to the fluser-owned tooling and any non-root inspection.
 if [ "$OS" = "Linux" ] && [ "$IS_WSL" = false ]; then
     SECURITY_FLAGS="$SECURITY_FLAGS --security-opt apparmor=unconfined"
 
