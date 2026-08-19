@@ -371,6 +371,75 @@ DATA_DIR="${DATA_DIR:-$DEFAULT_DATA_DIR}"
 read -p "Logs directory path [$DEFAULT_LOGS_DIR]: " LOGS_DIR
 LOGS_DIR="${LOGS_DIR:-$DEFAULT_LOGS_DIR}"
 
+# -------------------------------------------------------
+# Preprocessing pipelines (optional)
+#
+# A study can require this site to prepare its data before training starts.
+# NeuroFL never sends a command: it names a pipeline, and this node runs one
+# only if it is listed here. Recording a name is NOT an install — the tool
+# itself is installed by the site the way it installs any other software, so a
+# setup run never pulls several gigabytes of containers unannounced.
+#
+# The standard names below exist so that sites choosing the same tool describe
+# it identically. A study can only require a pipeline that EVERY target site
+# offers, so "mriqc" at one site and "MRIQC-anat" at another silently prevents a
+# multi-site study from being submitted at all.
+# -------------------------------------------------------
+
+# name|version|description
+STANDARD_PIPELINES=(
+    "mriqc|23.1.0|MRI quality control metrics"
+    "bids-validator|1.14.0|Validate BIDS dataset structure"
+    "defacing|2.0.0|Remove identifiable facial features"
+)
+
+SELECTED_PIPELINES=""
+echo ""
+echo "--------------------------------------------"
+echo "  Preprocessing pipelines (optional)"
+echo "--------------------------------------------"
+echo "A study can require this site to prepare its data before"
+echo "training. Choose which pipelines this site allows. Nothing"
+echo "is installed now, and you can change this later in the"
+echo "node dashboard."
+echo ""
+i=1
+for entry in "${STANDARD_PIPELINES[@]}"; do
+    IFS='|' read -r _pname _pver _pdesc <<< "$entry"
+    printf "  %d) %-16s %-8s %s\n" "$i" "$_pname" "$_pver" "$_pdesc"
+    i=$((i + 1))
+done
+echo "  $i) None — skip for now"
+echo ""
+echo "Selecting a pipeline records that this site ALLOWS it. You still"
+echo "need the tool installed, plus a preprocess.sh in the dataset"
+echo "folder that runs it. The dashboard explains both."
+echo ""
+
+# Same input handling as the licence gate: prefer a real terminal so this works
+# under `curl ... | bash`, and simply skip when there is nothing to ask on —
+# preprocessing is optional, so an unattended install must not fail here.
+PIPE_CHOICE=""
+if (exec 4< /dev/tty) 2>/dev/null; then
+    exec 4< /dev/tty
+    printf 'Select (e.g. "1 3", or Enter to skip): '
+    read -r PIPE_CHOICE <&4 || true
+elif [ -t 0 ]; then
+    printf 'Select (e.g. "1 3", or Enter to skip): '
+    read -r PIPE_CHOICE || true
+else
+    echo "  (no terminal to prompt on — skipping; add pipelines in the dashboard)"
+fi
+
+for choice in $PIPE_CHOICE; do
+    case "$choice" in
+        ''|*[!0-9]*) continue ;;
+    esac
+    if [ "$choice" -ge 1 ] && [ "$choice" -le "${#STANDARD_PIPELINES[@]}" ]; then
+        SELECTED_PIPELINES="${SELECTED_PIPELINES}${STANDARD_PIPELINES[$((choice - 1))]}"$'\n'
+    fi
+done
+
 echo ""
 echo "--------------------------------------------"
 echo "  Configuration (from bundle)"
@@ -383,6 +452,16 @@ echo "  Fleet CA:       $CA_BASENAME"
 echo "  Private key:    $KEY_BASENAME"
 echo "  Data Dir:       $DATA_DIR"
 echo "  Logs Dir:       $LOGS_DIR"
+if [ -n "$SELECTED_PIPELINES" ]; then
+    _plist=""
+    while IFS='|' read -r _pname _pver _pdesc; do
+        [ -z "$_pname" ] && continue
+        _plist="${_plist}${_plist:+, }${_pname} ${_pver}"
+    done <<< "$SELECTED_PIPELINES"
+    echo "  Preprocessing:  $_plist"
+else
+    echo "  Preprocessing:  none (add later in the dashboard)"
+fi
 echo "--------------------------------------------"
 echo ""
 read -p "Proceed? [Y/n]: " CONFIRM
@@ -401,6 +480,33 @@ echo ""
 mkdir -p "$DATA_DIR" "$LOGS_DIR"
 echo "  Created: $DATA_DIR"
 echo "  Created: $LOGS_DIR"
+
+# Record the allowed pipelines where the node reads them. Written only when the
+# operator chose some, so re-running setup never silently clears a list the site
+# has since curated in the dashboard.
+if [ -n "$SELECTED_PIPELINES" ]; then
+    mkdir -p "$DATA_DIR/.neurofl"
+    PIPELINES_JSON="$DATA_DIR/.neurofl/pipelines.json"
+    if [ -f "$PIPELINES_JSON" ]; then
+        echo "  Kept existing pipeline list: $PIPELINES_JSON"
+    else
+        {
+            printf '{\n  "pipelines": {\n'
+            _first=1
+            while IFS='|' read -r _pname _pver _pdesc; do
+                [ -z "$_pname" ] && continue
+                [ $_first -eq 0 ] && printf ',\n'
+                _first=0
+                # No command: the dataset's own preprocess.sh is used unless the
+                # operator sets one in the dashboard.
+                printf '    "%s": {"version": "%s", "command": "", "enabled": true}' \
+                    "$_pname" "$_pver"
+            done <<< "$SELECTED_PIPELINES"
+            printf '\n  },\n  "paused": false\n}\n'
+        } > "$PIPELINES_JSON"
+        echo "  Allowed pipelines recorded: $PIPELINES_JSON"
+    fi
+fi
 
 # -------------------------------------------------------
 # Config dir + bundle secrets (all platforms)

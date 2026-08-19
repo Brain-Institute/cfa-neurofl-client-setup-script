@@ -137,3 +137,23 @@ Contact the NeuroFL team with:
 ---
 
 **NeuroFL** — OBI Centre for Analytics
+## Preprocessing pipelines
+
+Setup asks which preprocessing pipelines this site allows. A study can require
+participating sites to prepare their data before training starts; a site runs a
+pipeline only if it appears in this list.
+
+Selecting a pipeline **records permission — it does not install anything**. The
+tool itself is installed by the site through its own process, and the dataset
+folder needs a `preprocess.sh` that runs it. The node dashboard explains both
+and can change the list at any time.
+
+The offered names are standard on purpose. A study can only require a pipeline
+that *every* target site offers, so two sites describing the same tool
+differently ("mriqc" vs "MRIQC-anat") quietly makes a multi-site study
+impossible to submit.
+
+Choosing nothing is fine — the site simply does not take part in studies that
+require preprocessing, and training is unaffected. The selection is written to
+`<data-dir>/.neurofl/pipelines.json`; re-running setup never overwrites a list
+the site has since curated.
