@@ -804,6 +804,16 @@ fi
 # at the container paths config.env names, and --env-file supplies the rest
 # (SUPERLINK_ADDRESS, ROOT_CERTIFICATES, SUPERNODE_PRIVATE_KEY, NODE_CONFIG,
 # VM_NAME, API_TOKEN, FL_SERVER_URL, SUPERLINK_INSECURE=false).
+#
+# *_NUM_THREADS=1 : force single-threaded BLAS/OpenBLAS for the ClientApp.
+# numpy/scipy models (e.g. PCA via numpy.linalg.eigh) use OpenBLAS, whose
+# multi-threaded pool DEADLOCKS on some node/CPU/cgroup setups inside the
+# sandbox — the ClientApp freezes on the first matrix op and the round hangs
+# with no error. flwr imports numpy before the modeller's code runs, so this
+# MUST be set in the container env (applied at numpy's first import); setting it
+# in shared.py is too late. Set here + propagated into the sandbox via the
+# nsjail profile's keep_env. Harmless for torch models (torch has its own
+# threading). Datasets are small per site, so single-threaded BLAS costs nothing.
 RUN_CMD="$DOCKER_CMD run -d --name fl-client \
   --restart unless-stopped \
   ${SECURITY_FLAGS} \
@@ -818,6 +828,11 @@ RUN_CMD="$DOCKER_CMD run -d --name fl-client \
   -v ${IDENTITIES_DIR}:/app/config/identities \
   -e FLWR_SUPEREXEC_SANDBOX_CONFIG=/etc/neurofl/nsjail.cfg \
   -e SUPERNODE_IDENTITIES_DIR=/app/config/identities \
+  -e OPENBLAS_NUM_THREADS=1 \
+  -e OMP_NUM_THREADS=1 \
+  -e MKL_NUM_THREADS=1 \
+  -e NUMEXPR_NUM_THREADS=1 \
+  -e VECLIB_MAXIMUM_THREADS=1 \
   --env-file ${CONFIG_DIR}/config.env \
   ${IMAGE}"
 
