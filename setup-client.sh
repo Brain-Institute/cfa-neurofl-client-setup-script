@@ -445,6 +445,23 @@ else
     echo "ALLOW_RUNTIME_DEPENDENCY_INSTALLATION=true" >> "$CONFIG_DIR/config.env"
 fi
 
+# Force single-threaded BLAS/OpenBLAS for the ClientApp. numpy/scipy models
+# (e.g. federated PCA via numpy.linalg.eigh) use OpenBLAS, whose multi-threaded
+# pool DEADLOCKS on some node/CPU/cgroup setups inside the sandbox — the
+# ClientApp freezes on its first matrix op and the round hangs with no error.
+# flwr imports numpy before the modeller's code runs, so this must be set in the
+# process env (applied at numpy's first import). Written into config.env so it is
+# passed via --env-file and re-read on EVERY `run-client.sh start` — a plain
+# restart picks it up, no full re-setup needed. Harmless for torch models.
+for _blasvar in OPENBLAS_NUM_THREADS OMP_NUM_THREADS MKL_NUM_THREADS \
+                NUMEXPR_NUM_THREADS VECLIB_MAXIMUM_THREADS; do
+    if grep -qE "^${_blasvar}=" "$CONFIG_DIR/config.env"; then
+        sed -i "s/^${_blasvar}=.*/${_blasvar}=1/" "$CONFIG_DIR/config.env"
+    else
+        echo "${_blasvar}=1" >> "$CONFIG_DIR/config.env"
+    fi
+done
+
 chmod 600 "$CONFIG_DIR/$KEY_BASENAME" "$CONFIG_DIR/config.env"
 chmod 644 "$CONFIG_DIR/$CA_BASENAME"
 
