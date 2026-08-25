@@ -804,6 +804,18 @@ if [ "$OS" = "Linux" ] && [ "$IS_WSL" = false ]; then
     setfacl -R -m u:1000:rwx "$LOGS_DIR"
     setfacl -R -d -m u:1000:rwx "$LOGS_DIR"
     echo "  Container permissions set (UID 1000)"
+
+    # nsjail bind-mounts each selected dataset dir (/data/<name>) into the inner
+    # sandbox, and needs READ + SEARCH (traverse) on every directory in the path,
+    # plus read on the data files — otherwise the mount fails with:
+    #   mount('/data/<name>'): Permission denied  ->  try 'chmod 0+X'
+    # and the ClientApp never launches (the round hangs, no error). The setfacl
+    # above only grants UID 1000; nsjail's mount needs the dirs traversable
+    # regardless of owner. a+rX = read + search on dirs (X = execute on dirs
+    # only, not files), read on files — safe for data the node is sharing.
+    chmod -R a+rX "$DATA_DIR" 2>/dev/null \
+        || echo "  WARNING: could not chmod $DATA_DIR a+rX — nsjail may fail to mount datasets."
+    echo "  Dataset directories made traversable for the sandbox (a+rX)"
 fi
 
 # -------------------------------------------------------
@@ -974,6 +986,19 @@ if [ -d "$HOST_CACHE_DIR" ]; then
         || echo "  WARNING: could not chown $HOST_CACHE_DIR — FAB installs inside the sandbox may fail with PermissionError."
 fi
 
+# Make dataset directories traversable so nsjail can bind-mount them into the
+# sandbox. Datasets are added AFTER setup (via the dashboard), so a dir created
+# later may be mode 700 / owned by another uid — nsjail then fails to mount it
+# with "mount('/data/<name>'): Permission denied -> try 'chmod 0+X'" and the
+# ClientApp never launches (the round hangs with no error). Re-assert read+search
+# on every start so newly added datasets self-heal. a+rX = read + traverse on
+# dirs, read on files — safe for data the node is already sharing for training.
+DATA_DIR="__DATA_DIR__"
+if [ -d "$DATA_DIR" ]; then
+    $SUDO chmod -R a+rX "$DATA_DIR" 2>/dev/null \
+        || echo "  WARNING: could not chmod $DATA_DIR a+rX — nsjail may fail to mount datasets."
+fi
+
 # ----- Step 4: Start new container -----
 echo "Starting client..."
 __RUN_CMD__
@@ -1008,6 +1033,7 @@ RUNEOF
 
 sed -i "s|__DOCKER_CMD__|${DOCKER_CMD}|g" "$SAVE_DIR/run-client.sh"
 sed -i "s|__HOST_CACHE_DIR__|${HOST_CACHE_DIR}|g" "$SAVE_DIR/run-client.sh"
+sed -i "s|__DATA_DIR__|${DATA_DIR}|g" "$SAVE_DIR/run-client.sh"
 sed -i "s|__RUN_CMD__|${RUN_CMD}|g" "$SAVE_DIR/run-client.sh"
 chmod +x "$SAVE_DIR/run-client.sh"
 echo "  Run command saved to: $SAVE_DIR/run-client.sh"
