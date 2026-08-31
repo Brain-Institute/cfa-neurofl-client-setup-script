@@ -623,11 +623,30 @@ clone_newcgroup: false
 keep_env: true
 keep_caps: false
 
-rlimit_cpu: 3600
-rlimit_fsize: 2048
+# ---------------------------------------------------------------------------
+# Resource limits — sized so ANY reasonable model runs without per-model tuning.
+#
+# The important one is rlimit_as (virtual address space). With NO rlimit_as,
+# nsjail applies a low built-in default; PyTorch then reserves large virtual
+# allocator/thread arenas and a normally-modest allocation (a 3D-conv im2col
+# workspace, a model weight/optimizer buffer) fails with
+#   "DefaultCPUAllocator: can't allocate memory (Cannot allocate memory)"
+# even though physical RAM is free. We therefore DO NOT cap virtual memory:
+# rlimit_as is effectively unlimited so any model can reserve what torch wants.
+# Physical RAM is bounded by the host itself (the container has no --memory
+# limit, so the OS OOM killer is the real backstop) — the crude virtual cap was
+# the wrong tool and only ever broke legitimate models.
+#
+# rlimit_fsize raised 2 GB -> 32 GB so a large model checkpoint/shard can be
+# written. rlimit_cpu set very high so long training runs are not killed
+# mid-round.
+rlimit_cpu: 86400            # 24h CPU-seconds (was 3600 = 1h; too short for training)
+rlimit_fsize: 32768          # 32 GB max file (was 2048 = 2 GB; blocked large checkpoints)
 rlimit_nofile: 4096
 rlimit_nproc: 1024
 rlimit_memlock: 67108864
+rlimit_as: 1048576           # 1 TB virtual = effectively unlimited (was unset -> low default that broke models)
+# ---------------------------------------------------------------------------
 
 seccomp_string: "DEFAULT ALLOW"
 
