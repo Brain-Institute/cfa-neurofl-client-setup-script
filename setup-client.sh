@@ -10,6 +10,152 @@
 # =============================================================
 set -e
 
+write_nsjail_cfg() {
+cat > "$CONFIG_DIR/nsjail.cfg" << 'NSJAIL_EOF'
+name: "flower-app"
+mode: ONCE
+cwd: "/tmp"
+time_limit: 0
+
+clone_newnet: false
+clone_newuser: true
+clone_newns: true
+clone_newpid: true
+clone_newipc: true
+clone_newuts: false
+clone_newcgroup: false
+
+keep_env: true
+keep_caps: false
+
+# ---------------------------------------------------------------------------
+# Resource limits — sized so ANY reasonable model runs without per-model tuning.
+#
+# The important one is rlimit_as (virtual address space). With NO rlimit_as,
+# nsjail applies a low built-in default; PyTorch then reserves large virtual
+# allocator/thread arenas and a normally-modest allocation (a 3D-conv im2col
+# workspace, a model weight/optimizer buffer) fails with
+#   "DefaultCPUAllocator: can't allocate memory (Cannot allocate memory)"
+# even though physical RAM is free. We therefore DO NOT cap virtual memory:
+# rlimit_as is effectively unlimited so any model can reserve what torch wants.
+# Physical RAM is bounded by the host itself (the container has no --memory
+# limit, so the OS OOM killer is the real backstop) — the crude virtual cap was
+# the wrong tool and only ever broke legitimate models.
+#
+# rlimit_fsize raised 2 GB -> 32 GB so a large model checkpoint/shard can be
+# written. rlimit_cpu set very high so long training runs are not killed
+# mid-round.
+rlimit_cpu: 86400            # 24h CPU-seconds (was 3600 = 1h; too short for training)
+rlimit_fsize: 32768          # 32 GB max file (was 2048 = 2 GB; blocked large checkpoints)
+rlimit_nofile: 4096
+rlimit_nproc: 1024
+rlimit_memlock: 67108864
+rlimit_as: 1048576           # 1 TB virtual = effectively unlimited (was unset -> low default that broke models)
+# ---------------------------------------------------------------------------
+
+seccomp_string: "DEFAULT ALLOW"
+
+mount {
+  src: "/"
+  dst: "/"
+  is_bind: true
+  rw: false
+}
+
+mount {
+  dst: "/tmp"
+  fstype: "tmpfs"
+  rw: true
+  options: "size=1073741824"
+  nosuid: true
+  nodev: true
+}
+
+mount {
+  dst: "/dev/shm"
+  fstype: "tmpfs"
+  rw: true
+  options: "size=4294967296"
+  nosuid: true
+  nodev: true
+}
+
+# Host-backed bind mounts for FAB install + uv cache. tmpfs needs RAM, and
+# torch+CUDA wheels need several GB which exceeds the 1 GB packaged-profile
+# tmpfs. Backed by the host filesystem (/host-cache/*) instead.
+mount {
+  src: "/host-cache/flwr"
+  dst: "/root/.flwr"
+  is_bind: true
+  rw: true
+}
+
+mount {
+  src: "/host-cache/cache"
+  dst: "/root/.cache"
+  is_bind: true
+  rw: true
+}
+
+mount {
+  dst: "/root/.config"
+  fstype: "tmpfs"
+  rw: true
+  options: "size=67108864"
+  nosuid: true
+  nodev: true
+}
+
+mount {
+  src: "/proc"
+  dst: "/proc"
+  is_bind: true
+  rw: false
+  nosuid: true
+  nodev: true
+}
+
+# Optional GPU device nodes (skipped on CPU-only hosts).
+mount {
+  src: "/dev/nvidiactl"
+  dst: "/dev/nvidiactl"
+  is_bind: true
+  rw: true
+  mandatory: false
+  is_dir: false
+}
+
+mount {
+  src: "/dev/nvidia-uvm"
+  dst: "/dev/nvidia-uvm"
+  is_bind: true
+  rw: true
+  mandatory: false
+  is_dir: false
+}
+
+mount {
+  src: "/dev/nvidia-uvm-tools"
+  dst: "/dev/nvidia-uvm-tools"
+  is_bind: true
+  rw: true
+  mandatory: false
+  is_dir: false
+}
+
+mount {
+  src: "/dev/nvidia0"
+  dst: "/dev/nvidia0"
+  is_bind: true
+  rw: true
+  mandatory: false
+  is_dir: false
+}
+NSJAIL_EOF
+chmod 644 "$CONFIG_DIR/nsjail.cfg"
+}
+
+
 OS="$(uname -s)"
 IS_WSL=false
 if grep -qi microsoft /proc/version 2>/dev/null; then
@@ -39,16 +185,70 @@ echo ""
 
 BUNDLE_PATH=""
 ACCEPT_LICENSE=false
+UPDATE_SANDBOX=false
 for arg in "$@"; do
     case "$arg" in
         --accept-license) ACCEPT_LICENSE=true ;;
+        --update-sandbox) UPDATE_SANDBOX=true ;;
         -*)               echo "Unknown option: $arg" >&2; exit 1 ;;
         *)                [ -z "$BUNDLE_PATH" ] && BUNDLE_PATH="$arg" ;;
     esac
 done
 
+# -------------------------------------------------------
+# --update-sandbox : in-place sandbox refresh for an ALREADY-onboarded node.
+# -------------------------------------------------------
+# Refreshes ONLY the nsjail sandbox policy (memory/cpu/file limits) and restarts
+# the client. It needs NO bundle and NEVER touches identity: config.env, the
+# node key, certificates, container name and dataset mounts are all left exactly
+# as they are. Use this to pick up a sandbox fix without re-onboarding — running
+# the full setup on a configured node would overwrite its bundle and identity.
+if [ "$UPDATE_SANDBOX" = true ]; then
+    if [ -d "/opt/fl-client" ] && [ -f "/opt/fl-client/config.env" ]; then
+        CONFIG_DIR="/opt/fl-client"
+    elif [ -f "$HOME/.neurofl/config.env" ]; then
+        CONFIG_DIR="$HOME/.neurofl"
+    else
+        echo "Error: --update-sandbox needs an already-configured node, but no" >&2
+        echo "       config.env was found in /opt/fl-client or $HOME/.neurofl." >&2
+        echo "       Onboard first with a bundle; only then can the sandbox be updated." >&2
+        exit 1
+    fi
+    echo "=== NeuroFL sandbox update (in place) ==="
+    echo "  Config dir: $CONFIG_DIR"
+    echo "  Identity (config.env, node key, certs) will NOT be touched."
+
+    if [ -f "$CONFIG_DIR/nsjail.cfg" ]; then
+        cp "$CONFIG_DIR/nsjail.cfg" "$CONFIG_DIR/nsjail.cfg.bak.$(date +%Y%m%d%H%M%S)"
+        echo "  Backed up existing nsjail.cfg"
+    else
+        echo "  No existing nsjail.cfg found; writing a fresh one." >&2
+    fi
+
+    write_nsjail_cfg
+    echo "  nsjail.cfg refreshed with current sandbox limits."
+
+    # Restart via the node's own run-client.sh (written at onboarding): it
+    # re-reads config.env and re-mounts nsjail.cfg — no identity change.
+    if [ -f "$CONFIG_DIR/run-client.sh" ]; then
+        echo "  Restarting client to apply the new sandbox..."
+        bash "$CONFIG_DIR/run-client.sh" || {
+            echo "  Restart via run-client.sh failed — restart the 'fl-client'" >&2
+            echo "  container manually to apply the change." >&2
+            exit 1
+        }
+    else
+        echo "  No run-client.sh in $CONFIG_DIR — restart the 'fl-client'"
+        echo "  container manually to apply the new sandbox."
+    fi
+    echo ""
+    echo "Sandbox update complete. Nothing else was changed."
+    exit 0
+fi
+
 if [ -z "$BUNDLE_PATH" ] || [ ! -f "$BUNDLE_PATH" ]; then
     echo "Usage: bash setup-client.sh [--accept-license] <site>-onboarding.tar.gz"
+    echo "       bash setup-client.sh --update-sandbox   (refresh sandbox on an already-onboarded node)"
     echo "Error: onboarding bundle not found."
     exit 1
 fi
@@ -606,148 +806,7 @@ echo "  Seccomp profile installed (nsjail outer policy)"
 # "No space left on device". This custom profile binds those caches to the host
 # filesystem instead, so large installs land on disk. We point SuperExec at it
 # via FLWR_SUPEREXEC_SANDBOX_CONFIG below.
-cat > "$CONFIG_DIR/nsjail.cfg" << 'NSJAIL_EOF'
-name: "flower-app"
-mode: ONCE
-cwd: "/tmp"
-time_limit: 0
-
-clone_newnet: false
-clone_newuser: true
-clone_newns: true
-clone_newpid: true
-clone_newipc: true
-clone_newuts: false
-clone_newcgroup: false
-
-keep_env: true
-keep_caps: false
-
-# ---------------------------------------------------------------------------
-# Resource limits — sized so ANY reasonable model runs without per-model tuning.
-#
-# The important one is rlimit_as (virtual address space). With NO rlimit_as,
-# nsjail applies a low built-in default; PyTorch then reserves large virtual
-# allocator/thread arenas and a normally-modest allocation (a 3D-conv im2col
-# workspace, a model weight/optimizer buffer) fails with
-#   "DefaultCPUAllocator: can't allocate memory (Cannot allocate memory)"
-# even though physical RAM is free. We therefore DO NOT cap virtual memory:
-# rlimit_as is effectively unlimited so any model can reserve what torch wants.
-# Physical RAM is bounded by the host itself (the container has no --memory
-# limit, so the OS OOM killer is the real backstop) — the crude virtual cap was
-# the wrong tool and only ever broke legitimate models.
-#
-# rlimit_fsize raised 2 GB -> 32 GB so a large model checkpoint/shard can be
-# written. rlimit_cpu set very high so long training runs are not killed
-# mid-round.
-rlimit_cpu: 86400            # 24h CPU-seconds (was 3600 = 1h; too short for training)
-rlimit_fsize: 32768          # 32 GB max file (was 2048 = 2 GB; blocked large checkpoints)
-rlimit_nofile: 4096
-rlimit_nproc: 1024
-rlimit_memlock: 67108864
-rlimit_as: 1048576           # 1 TB virtual = effectively unlimited (was unset -> low default that broke models)
-# ---------------------------------------------------------------------------
-
-seccomp_string: "DEFAULT ALLOW"
-
-mount {
-  src: "/"
-  dst: "/"
-  is_bind: true
-  rw: false
-}
-
-mount {
-  dst: "/tmp"
-  fstype: "tmpfs"
-  rw: true
-  options: "size=1073741824"
-  nosuid: true
-  nodev: true
-}
-
-mount {
-  dst: "/dev/shm"
-  fstype: "tmpfs"
-  rw: true
-  options: "size=4294967296"
-  nosuid: true
-  nodev: true
-}
-
-# Host-backed bind mounts for FAB install + uv cache. tmpfs needs RAM, and
-# torch+CUDA wheels need several GB which exceeds the 1 GB packaged-profile
-# tmpfs. Backed by the host filesystem (/host-cache/*) instead.
-mount {
-  src: "/host-cache/flwr"
-  dst: "/root/.flwr"
-  is_bind: true
-  rw: true
-}
-
-mount {
-  src: "/host-cache/cache"
-  dst: "/root/.cache"
-  is_bind: true
-  rw: true
-}
-
-mount {
-  dst: "/root/.config"
-  fstype: "tmpfs"
-  rw: true
-  options: "size=67108864"
-  nosuid: true
-  nodev: true
-}
-
-mount {
-  src: "/proc"
-  dst: "/proc"
-  is_bind: true
-  rw: false
-  nosuid: true
-  nodev: true
-}
-
-# Optional GPU device nodes (skipped on CPU-only hosts).
-mount {
-  src: "/dev/nvidiactl"
-  dst: "/dev/nvidiactl"
-  is_bind: true
-  rw: true
-  mandatory: false
-  is_dir: false
-}
-
-mount {
-  src: "/dev/nvidia-uvm"
-  dst: "/dev/nvidia-uvm"
-  is_bind: true
-  rw: true
-  mandatory: false
-  is_dir: false
-}
-
-mount {
-  src: "/dev/nvidia-uvm-tools"
-  dst: "/dev/nvidia-uvm-tools"
-  is_bind: true
-  rw: true
-  mandatory: false
-  is_dir: false
-}
-
-mount {
-  src: "/dev/nvidia0"
-  dst: "/dev/nvidia0"
-  is_bind: true
-  rw: true
-  mandatory: false
-  is_dir: false
-}
-NSJAIL_EOF
-chmod 644 "$CONFIG_DIR/nsjail.cfg"
+write_nsjail_cfg
 echo "  nsjail app-sandbox profile installed (inner policy, host-backed caches)"
 
 # Host-backed cache dirs the nsjail profile binds in. Sized for torch+CUDA wheels
