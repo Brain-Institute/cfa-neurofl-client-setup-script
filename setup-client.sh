@@ -11,7 +11,11 @@
 set -e
 
 write_nsjail_cfg() {
-cat > "$CONFIG_DIR/nsjail.cfg" << 'NSJAIL_EOF'
+# Writes the nsjail policy. Target path defaults to $CONFIG_DIR/nsjail.cfg (the
+# onboarding location) but can be overridden with $1 so the in-place updater can
+# target whatever filename a given node actually mounts.
+NSJAIL_TARGET="${1:-$CONFIG_DIR/nsjail.cfg}"
+cat > "$NSJAIL_TARGET" << 'NSJAIL_EOF'
 name: "flower-app"
 mode: ONCE
 cwd: "/tmp"
@@ -152,7 +156,7 @@ mount {
   is_dir: false
 }
 NSJAIL_EOF
-chmod 644 "$CONFIG_DIR/nsjail.cfg"
+chmod 644 "$NSJAIL_TARGET"
 }
 
 
@@ -186,13 +190,17 @@ echo ""
 BUNDLE_PATH=""
 ACCEPT_LICENSE=false
 UPDATE_SANDBOX=false
-for arg in "$@"; do
-    case "$arg" in
+UPDATE_CONFIG_DIR=""
+while [ $# -gt 0 ]; do
+    case "$1" in
         --accept-license) ACCEPT_LICENSE=true ;;
         --update-sandbox) UPDATE_SANDBOX=true ;;
-        -*)               echo "Unknown option: $arg" >&2; exit 1 ;;
-        *)                [ -z "$BUNDLE_PATH" ] && BUNDLE_PATH="$arg" ;;
+        --config-dir)     UPDATE_CONFIG_DIR="$2"; shift ;;
+        --config-dir=*)   UPDATE_CONFIG_DIR="${1#*=}" ;;
+        -*)               echo "Unknown option: $1" >&2; exit 1 ;;
+        *)                [ -z "$BUNDLE_PATH" ] && BUNDLE_PATH="$1" ;;
     esac
+    shift
 done
 
 # -------------------------------------------------------
@@ -204,41 +212,92 @@ done
 # as they are. Use this to pick up a sandbox fix without re-onboarding — running
 # the full setup on a configured node would overwrite its bundle and identity.
 if [ "$UPDATE_SANDBOX" = true ]; then
-    if [ -d "/opt/fl-client" ] && [ -f "/opt/fl-client/config.env" ]; then
-        CONFIG_DIR="/opt/fl-client"
-    elif [ -f "$HOME/.neurofl/config.env" ]; then
-        CONFIG_DIR="$HOME/.neurofl"
+    # Selecting the RIGHT node's config dir is safety-critical: a host can run
+    # more than one node (e.g. /opt/fl-client AND /opt/fl-client-<site>), each
+    # with its own config.env, run-client.sh, dataset mounts and identity.
+    # Guessing /opt/fl-client would restart the WRONG node and remount its data.
+    # So: honour an explicit --config-dir; otherwise auto-discover, and REFUSE
+    # (listing what was found) if there is more than one candidate.
+    if [ -n "$UPDATE_CONFIG_DIR" ]; then
+        if [ ! -f "$UPDATE_CONFIG_DIR/config.env" ]; then
+            echo "Error: --config-dir '$UPDATE_CONFIG_DIR' has no config.env." >&2
+            echo "       Point it at the node's install dir (the one holding" >&2
+            echo "       config.env, run-client.sh and the node key)." >&2
+            exit 1
+        fi
+        CONFIG_DIR="$UPDATE_CONFIG_DIR"
     else
-        echo "Error: --update-sandbox needs an already-configured node, but no" >&2
-        echo "       config.env was found in /opt/fl-client or $HOME/.neurofl." >&2
-        echo "       Onboard first with a bundle; only then can the sandbox be updated." >&2
-        exit 1
+        # Discover every candidate node dir on this host.
+        CANDIDATES=""
+        for d in /opt/fl-client /opt/fl-client-* "$HOME/.neurofl" "$HOME"/.neurofl-*; do
+            [ -f "$d/config.env" ] && CANDIDATES="$CANDIDATES $d"
+        done
+        # shellcheck disable=SC2086
+        set -- $CANDIDATES
+        if [ "$#" -eq 0 ]; then
+            echo "Error: --update-sandbox needs an already-configured node, but no" >&2
+            echo "       config.env was found under /opt/fl-client* or ~/.neurofl*." >&2
+            echo "       Onboard first with a bundle; only then can the sandbox be updated." >&2
+            exit 1
+        elif [ "$#" -gt 1 ]; then
+            echo "Error: this host has more than one node; refusing to guess which to" >&2
+            echo "       update. Re-run with --config-dir pointing at the one you mean:" >&2
+            for d in "$@"; do
+                vm="$(grep -E '^VM_NAME=' "$d/config.env" 2>/dev/null | head -n1 | cut -d= -f2-)"
+                echo "         --config-dir $d   (VM_NAME=${vm:-unknown})" >&2
+            done
+            exit 1
+        fi
+        CONFIG_DIR="$1"
     fi
     echo "=== NeuroFL sandbox update (in place) ==="
     echo "  Config dir: $CONFIG_DIR"
+    UPD_VM="$(grep -E '^VM_NAME=' "$CONFIG_DIR/config.env" 2>/dev/null | head -n1 | cut -d= -f2-)"
+    echo "  Node:       ${UPD_VM:-unknown}"
     echo "  Identity (config.env, node key, certs) will NOT be touched."
 
-    if [ -f "$CONFIG_DIR/nsjail.cfg" ]; then
-        cp "$CONFIG_DIR/nsjail.cfg" "$CONFIG_DIR/nsjail.cfg.bak.$(date +%Y%m%d%H%M%S)"
-        echo "  Backed up existing nsjail.cfg"
+    # Find the nsjail file this node ACTUALLY mounts — it is not always named
+    # nsjail.cfg (some nodes use nsjail-flower-custom.cfg). Prefer the path that
+    # run-client.sh mounts into the container; fall back to a .cfg in CONFIG_DIR;
+    # else default to nsjail.cfg.
+    NSJAIL_FILE=""
+    if [ -f "$CONFIG_DIR/run-client.sh" ]; then
+        NSJAIL_FILE="$(grep -oE '[^ "]*nsjail[^ ":]*\.cfg' "$CONFIG_DIR/run-client.sh" 2>/dev/null | grep -vE '\.bak' | head -n1)"
+        # Resolve a bare filename against CONFIG_DIR.
+        case "$NSJAIL_FILE" in
+            "" ) ;;
+            /* ) : ;;                                   # absolute (host path)
+            *  ) NSJAIL_FILE="$CONFIG_DIR/$(basename "$NSJAIL_FILE")" ;;
+        esac
+    fi
+    if [ -z "$NSJAIL_FILE" ]; then
+        # No mount reference found; use an existing .cfg in CONFIG_DIR if present.
+        NSJAIL_FILE="$(ls "$CONFIG_DIR"/*nsjail*.cfg 2>/dev/null | grep -vE '\.bak' | head -n1)"
+        [ -z "$NSJAIL_FILE" ] && NSJAIL_FILE="$CONFIG_DIR/nsjail.cfg"
+    fi
+    echo "  Sandbox file: $NSJAIL_FILE"
+
+    if [ -f "$NSJAIL_FILE" ]; then
+        cp "$NSJAIL_FILE" "$NSJAIL_FILE.bak.$(date +%Y%m%d%H%M%S)"
+        echo "  Backed up existing sandbox file"
     else
-        echo "  No existing nsjail.cfg found; writing a fresh one." >&2
+        echo "  No existing sandbox file found; writing a fresh one." >&2
     fi
 
-    write_nsjail_cfg
-    echo "  nsjail.cfg refreshed with current sandbox limits."
+    write_nsjail_cfg "$NSJAIL_FILE"
+    echo "  Sandbox policy refreshed with current limits."
 
     # Restart via the node's own run-client.sh (written at onboarding): it
     # re-reads config.env and re-mounts nsjail.cfg — no identity change.
     if [ -f "$CONFIG_DIR/run-client.sh" ]; then
         echo "  Restarting client to apply the new sandbox..."
         bash "$CONFIG_DIR/run-client.sh" || {
-            echo "  Restart via run-client.sh failed — restart the 'fl-client'" >&2
+            echo "  Restart via run-client.sh failed — restart this node's" >&2
             echo "  container manually to apply the change." >&2
             exit 1
         }
     else
-        echo "  No run-client.sh in $CONFIG_DIR — restart the 'fl-client'"
+        echo "  No run-client.sh in $CONFIG_DIR — restart this node's"
         echo "  container manually to apply the new sandbox."
     fi
     echo ""
