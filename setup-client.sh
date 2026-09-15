@@ -119,6 +119,40 @@ mount {
   nodev: true
 }
 
+# Hide the site's key material from the sandboxed app. The "/" bind above is
+# read-only but READABLE, and uid 0 inside the jail is uid 0 outside, so without
+# these the modeller's code could read the SuperNode private keys (the bundle key
+# mounted at /app/config/supernode.key and the per-dataset keys under
+# /app/config/identities). /app/config/appio-tls, which the app needs for the
+# loopback Runtime API CA, stays visible. The file bind is optional so a node
+# without a bundle key still starts.
+mount {
+  dst: "/app/config/identities"
+  fstype: "tmpfs"
+  rw: false
+  options: "size=4096"
+  nosuid: true
+  nodev: true
+}
+
+mount {
+  dst: "/run/secrets"
+  fstype: "tmpfs"
+  rw: false
+  options: "size=4096"
+  nosuid: true
+  nodev: true
+}
+
+mount {
+  src: "/dev/null"
+  dst: "/app/config/supernode.key"
+  is_bind: true
+  rw: false
+  is_dir: false
+  mandatory: false
+}
+
 # Optional GPU device nodes (skipped on CPU-only hosts).
 mount {
   src: "/dev/nvidiactl"
