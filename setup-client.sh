@@ -110,13 +110,17 @@ mount {
   nodev: true
 }
 
+# A procfs of the jail's own PID namespace, never a bind of the container's
+# /proc: through a bound /proc the app (uid 0 in the jail = uid 0 outside)
+# could read other processes' environment and reach masked paths via
+# /proc/<pid>/root. Needs --security-opt systempaths=unconfined on docker run.
 mount {
-  src: "/proc"
   dst: "/proc"
-  is_bind: true
+  fstype: "proc"
   rw: false
   nosuid: true
   nodev: true
+  noexec: true
 }
 
 # Optional GPU device nodes (skipped on CPU-only hosts).
@@ -154,6 +158,57 @@ mount {
   rw: true
   mandatory: false
   is_dir: false
+}
+# ---- Secret masks: hide the site's key material and every other dataset's
+# caches from the sandboxed app. These must be the LAST mounts touching each
+# path. The cache binds above already hold /root/.flwr and /root/.cache, so
+# masking /host-cache afterwards leaves the app's own caches usable. The
+# watcher in the client image checks for exactly these masks and adds any
+# that are missing; shipping them here keeps the policy readable as written.
+mount {
+  dst: "/app/logs/identities"
+  fstype: "tmpfs"
+  rw: false
+  options: "size=4096"
+  nosuid: true
+  nodev: true
+}
+
+mount {
+  dst: "/app/config/identities"
+  fstype: "tmpfs"
+  rw: false
+  options: "size=4096"
+  nosuid: true
+  nodev: true
+}
+
+mount {
+  dst: "/run/secrets"
+  fstype: "tmpfs"
+  rw: false
+  options: "size=4096"
+  nosuid: true
+  nodev: true
+}
+
+mount {
+  src: "/dev/null"
+  dst: "/app/config/supernode.key"
+  is_bind: true
+  rw: false
+  is_dir: false
+  mandatory: false
+}
+
+mount {
+  dst: "/host-cache"
+  fstype: "tmpfs"
+  rw: false
+  mandatory: true
+  options: "size=4096"
+  nosuid: true
+  nodev: true
 }
 NSJAIL_EOF
 chmod 644 "$NSJAIL_TARGET"
@@ -885,6 +940,11 @@ echo "  nsjail app-sandbox profile installed (inner policy, host-backed caches)"
 # writable target, and force root ownership even over a stale 1000-owned apps/
 # left by a pre-fix install.
 HOST_CACHE_DIR="/var/lib/flwr-cache/${VM_NAME}"
+# Mounted as ONE bind at /host-cache. The jail policy masks /host-cache with a
+# tmpfs after binding this dataset's own subdirectories onto /root/.flwr and
+# /root/.cache; a Docker bind BELOW that mask (/host-cache/cache, /host-cache/flwr)
+# is a hidden submount that makes nsjail's read-only remount of / fail
+# ("remountOne(): statvfs('.../host-cache/cache'): No such file or directory").
 mkdir -p "$HOST_CACHE_DIR/cache" \
          "$HOST_CACHE_DIR/flwr/apps" \
          "$HOST_CACHE_DIR/flwr/runtime-envs"
@@ -930,6 +990,14 @@ SECURITY_FLAGS="--user 0:0 --cap-add SYS_ADMIN --cap-add SETUID --cap-add SETGID
 # accessible to the fluser-owned tooling and any non-root inspection.
 if [ "$OS" = "Linux" ] && [ "$IS_WSL" = false ]; then
     SECURITY_FLAGS="$SECURITY_FLAGS --security-opt apparmor=unconfined"
+    # The Flower 1.39 client image gives every ClientApp jail a procfs of its OWN
+    # pid namespace (so a modeller's code cannot read other processes through a
+    # bound /proc). The kernel refuses that mount while Docker's default /proc
+    # masks (/proc/kcore etc.) are in place -> nsjail dies with
+    # "Failed to mount mandatory point: '/proc'" and the site never trains while
+    # still heartbeating as healthy. systempaths=unconfined lifts the masks on
+    # the container; the jail then hides them again with its own procfs.
+    SECURITY_FLAGS="$SECURITY_FLAGS --security-opt systempaths=unconfined"
 
     if ! command -v setfacl &> /dev/null; then
         apt-get update -qq && apt-get install -y -qq acl > /dev/null 2>&1
@@ -989,8 +1057,7 @@ RUN_CMD="$DOCKER_CMD run -d --name fl-client \
   -v ${CONFIG_DIR}/${CA_BASENAME}:${ROOT_CERTIFICATES}:ro \
   -v ${CONFIG_DIR}/${KEY_BASENAME}:${SUPERNODE_PRIVATE_KEY}:ro \
   -v ${CONFIG_DIR}/nsjail.cfg:/etc/neurofl/nsjail.cfg:ro \
-  -v ${HOST_CACHE_DIR}/cache:/host-cache/cache \
-  -v ${HOST_CACHE_DIR}/flwr:/host-cache/flwr \
+  -v ${HOST_CACHE_DIR}:/host-cache \
   -v ${IDENTITIES_DIR}:/app/config/identities \
   -e FLWR_SUPEREXEC_SANDBOX_CONFIG=/etc/neurofl/nsjail.cfg \
   -e SUPERNODE_IDENTITIES_DIR=/app/config/identities \
