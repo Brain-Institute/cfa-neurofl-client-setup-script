@@ -102,14 +102,21 @@ docker restart fl-client            # Restart the client
 docker stop fl-client               # Stop the client
 ```
 
-To update the client after a new version is released:
+To update the client after a new version is released, re-run the setup script
+with the same bundle you installed with:
 
 ```bash
-docker pull daccacrneurofed.azurecr.io/fl-client:latest
-docker stop fl-client && docker rm fl-client
-bash /opt/fl-client/run-client.sh        # Linux
-bash ~/.neurofl/run-client.sh            # Mac / Windows (WSL)
+curl -sSL https://raw.githubusercontent.com/Brain-Institute/cfa-neurofl-client-setup-script/main/setup-client.sh -o setup-client.sh
+bash setup-client.sh <your-site>.tar.gz
 ```
+
+It finds the running node, offers its current data and logs directories as the
+defaults (press Enter to keep them), pulls the new image and replaces the
+container. Datasets, node identity and settings are kept. A release can change
+how the container is started (mounts, security flags, sandbox policy), and only
+the setup script applies that — `docker pull` plus the saved `run-client.sh`
+restarts the old run line under the new image, which may leave the node unable
+to train.
 
 > On Linux, prefix docker commands with `sudo` if needed.
 

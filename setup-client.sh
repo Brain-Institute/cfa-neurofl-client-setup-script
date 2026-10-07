@@ -679,6 +679,27 @@ else
     DEFAULT_LOGS_DIR="$HOME/fl-logs"
 fi
 
+# A re-run on an already-installed node (an update) keeps that node's current
+# directories: read them from the existing fl-client container so that Enter
+# means "same as before". Without this the prompts offered the platform
+# defaults, and an operator who pressed Enter on an update pointed the new
+# container at an empty data directory — the node came back with no datasets.
+# A fresh install (no container yet) still sees the platform defaults.
+_prev_mount() {  # $1 = path inside the container -> prints its host directory
+    local out=""
+    out="$(docker inspect fl-client --format '{{range .Mounts}}{{.Source}}{{"\t"}}{{.Destination}}{{"\n"}}{{end}}' 2>/dev/null)" \
+        || out="$(sudo -n docker inspect fl-client --format '{{range .Mounts}}{{.Source}}{{"\t"}}{{.Destination}}{{"\n"}}{{end}}' 2>/dev/null)" \
+        || out=""
+    printf '%s\n' "$out" | awk -F'\t' -v want="$1" '$2 == want { print $1; exit }'
+}
+PREV_DATA_DIR="$(_prev_mount /data)"
+PREV_LOGS_DIR="$(_prev_mount /app/logs)"
+if [ -n "$PREV_DATA_DIR" ] || [ -n "$PREV_LOGS_DIR" ]; then
+    echo "An installed node was found. Press Enter to keep its current directories."
+    [ -n "$PREV_DATA_DIR" ] && DEFAULT_DATA_DIR="$PREV_DATA_DIR"
+    [ -n "$PREV_LOGS_DIR" ] && DEFAULT_LOGS_DIR="$PREV_LOGS_DIR"
+fi
+
 read -p "Data directory path [$DEFAULT_DATA_DIR]: " DATA_DIR
 DATA_DIR="${DATA_DIR:-$DEFAULT_DATA_DIR}"
 
