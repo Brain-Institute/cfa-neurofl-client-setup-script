@@ -1005,20 +1005,27 @@ echo "  SuperNode identities dir ready at $IDENTITIES_DIR"
 # host-side data/cache dirs are owned by UID 1000 but root writes them freely.)
 SECURITY_FLAGS="--user 0:0 --cap-add SYS_ADMIN --cap-add SETUID --cap-add SETGID --security-opt seccomp=$CONFIG_DIR/seccomp-profile.json"
 
+# Every host, WSL and macOS included (Docker Desktop runs a Linux VM with the
+# same /proc masks). The Flower 1.39 client image gives every ClientApp jail a
+# procfs of its OWN pid namespace (so a modeller's code cannot read other
+# processes through a bound /proc). Docker's default /proc masks (/proc/bus,
+# /proc/kcore, /proc/sys ...) are submounts under the recursive bind of /, and
+# they break that mount: a stock kernel refuses the procfs
+# ("Failed to mount mandatory point: '/proc'"), the WSL kernel accepts it and
+# nsjail then trips on the hidden submount
+# ("mount('.../proc/bus', MS_REMOUNT|MS_BIND): Invalid argument"). Either way
+# the site never trains while still heartbeating as healthy.
+# systempaths=unconfined lifts the masks on the container; the jail then hides
+# them again with its own procfs. This is NOT an AppArmor flag, so it must not
+# sit in the Linux-only block below (that gap is what broke WSL sites).
+SECURITY_FLAGS="$SECURITY_FLAGS --security-opt systempaths=unconfined"
+
 # Linux-only host extras: AppArmor override (docker-default would block nsjail's
 # mounts) and POSIX ACLs on data/logs. The container runs as root now, so it can
 # write these regardless, but we keep the UID-1000 ACLs so files it creates stay
 # accessible to the fluser-owned tooling and any non-root inspection.
 if [ "$OS" = "Linux" ] && [ "$IS_WSL" = false ]; then
     SECURITY_FLAGS="$SECURITY_FLAGS --security-opt apparmor=unconfined"
-    # The Flower 1.39 client image gives every ClientApp jail a procfs of its OWN
-    # pid namespace (so a modeller's code cannot read other processes through a
-    # bound /proc). The kernel refuses that mount while Docker's default /proc
-    # masks (/proc/kcore etc.) are in place -> nsjail dies with
-    # "Failed to mount mandatory point: '/proc'" and the site never trains while
-    # still heartbeating as healthy. systempaths=unconfined lifts the masks on
-    # the container; the jail then hides them again with its own procfs.
-    SECURITY_FLAGS="$SECURITY_FLAGS --security-opt systempaths=unconfined"
 
     if ! command -v setfacl &> /dev/null; then
         apt-get update -qq && apt-get install -y -qq acl > /dev/null 2>&1
